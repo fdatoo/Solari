@@ -406,6 +406,23 @@ TEST_F(VirtualHidDeviceTest, RoutesAndDeduplicatesGamepadFeedback) {
   ASSERT_TRUE(adapter->dispatch_output(output).ok());
   EXPECT_TRUE(feedback_queue()->pop(10ms));
 
+  output.kind = lvh::GamepadOutputKind::player_leds;
+  output.player_leds = {true, false, true, false};
+  output.flashing_player_leds = {false, true, false, true};
+  ASSERT_TRUE(adapter->dispatch_output(output).ok());
+  feedback = feedback_queue()->pop(10ms);
+  ASSERT_TRUE(feedback);
+  EXPECT_EQ(feedback->type, platf::gamepad_feedback_e::set_player_leds);
+  EXPECT_EQ(feedback->data.player_leds.solid, 0x05);
+  EXPECT_EQ(feedback->data.player_leds.flashing, 0x0A);
+  ASSERT_TRUE(adapter->dispatch_output(output).ok());
+  EXPECT_FALSE(feedback_queue()->pop(0ms));
+  output.player_leds[3] = true;
+  ASSERT_TRUE(adapter->dispatch_output(output).ok());
+  feedback = feedback_queue()->pop(10ms);
+  ASSERT_TRUE(feedback);
+  EXPECT_EQ(feedback->data.player_leds.solid, 0x0D);
+
   output.kind = lvh::GamepadOutputKind::adaptive_triggers;
   output.adaptive_trigger_flags = 5;
   output.left_trigger_effect_type = 6;
