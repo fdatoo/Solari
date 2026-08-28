@@ -75,6 +75,12 @@ namespace platf {
   }
 
   std::unique_ptr<deinit_t> init() {
+    // Asked for first, and unconditionally. A process appears in the Accessibility
+    // list only once it has requested access, so deferring this until after the
+    // screen capture gate would hide it from that list on exactly the run where
+    // the user is trying to grant both.
+    check_accessibility_permission();
+
     // This will generate a warning about CGPreflightScreenCaptureAccess and
     // CGRequestScreenCaptureAccess being unavailable before macOS 10.15, but
     // we have a guard to prevent it from being called on those earlier systems.
@@ -100,8 +106,6 @@ namespace platf {
 #pragma clang diagnostic pop
     // Record that we determined that we have the screen capture permission.
     screen_capture_allowed = true;
-
-    check_accessibility_permission();
 
     return std::make_unique<deinit_t>();
   }
