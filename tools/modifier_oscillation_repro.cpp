@@ -86,8 +86,10 @@ namespace {
   /// Faithful copy of the backend's shared modifier state, macos_backend.cpp:441.
   class ModifierAccumulator {
   public:
+    virtual ~ModifierAccumulator() = default;
+
     /// Mirrors MacosKeyboard::submit(), macos_backend.cpp:481-497.
-    void submit(int portable_key_code, bool pressed) {
+    virtual void submit(int portable_key_code, bool pressed) {
       const auto key = macos_key_code(portable_key_code);
       if (key < 0) {
         return;
@@ -120,7 +122,7 @@ namespace {
       return shift_presses_;
     }
 
-  private:
+  protected:
     /// A game sees a transition whenever the generic Shift bit changes.
     void record_observation() {
       const bool down = shift_is_down();
@@ -134,9 +136,56 @@ namespace {
     }
 
     std::uint64_t keyboard_flags_ {};
+
+  private:
     bool last_observed_ = false;
     unsigned transitions_ = 0;
     unsigned shift_presses_ = 0;
+  };
+
+  /**
+   * @brief Solari's reference counted accumulator.
+   *
+   * Mirrors macos_input_t::apply_modifier() in src/platform/macos/input.cpp.
+   * Counting presses per device bit means the synthetic release that brackets a
+   * key cannot clear a modifier the player is still physically holding.
+   */
+  class RefCountedAccumulator final: public ModifierAccumulator {
+  public:
+    void submit(int portable_key_code, bool pressed) override {
+      const auto key = macos_key_code(portable_key_code);
+      if (key < 0) {
+        return;
+      }
+
+      ModifierFlags modifier_flags;
+      if (modifier_flags_for_key(key, modifier_flags)) {
+        const bool is_left = modifier_flags.device == dev_lshift;
+        int &count = is_left ? left_count_ : right_count_;
+        const int &sibling = is_left ? right_count_ : left_count_;
+
+        if (pressed) {
+          count++;
+          keyboard_flags_ |= modifier_flags.generic | modifier_flags.device;
+        } else {
+          if (count > 0) {
+            count--;
+          }
+          if (count == 0) {
+            keyboard_flags_ &= ~modifier_flags.device;
+            if (sibling == 0) {
+              keyboard_flags_ &= ~modifier_flags.generic;
+            }
+          }
+        }
+      }
+
+      record_observation();
+    }
+
+  private:
+    int left_count_ = 0;
+    int right_count_ = 0;
   };
 
   /// Mirrors send_key_and_modifiers(), src/input.cpp:989.
@@ -154,51 +203,85 @@ namespace {
 
 }  // namespace
 
-int main() {
+namespace {
+
   constexpr double repeat_period_s = 1.0 / 24.9;  // src/config.cpp:847
   constexpr int repeats = 25;  // roughly one second of holding the key
 
-  std::printf("Held-modifier oscillation reproducer\n");
-  std::printf("====================================\n\n");
+  /**
+   * @brief Play the sprint-and-run scenario through one accumulator.
+   *
+   * The player holds Left Shift to sprint, then holds W to run. The client
+   * reports MODIFIER_SHIFT on the W packets, and because shortcutFlags has not
+   * recorded Shift as held, src/input.cpp:1068 attaches Shift as a synthetic
+   * modifier. That decision is captured into the repeat task at
+   * src/input.cpp:1093 and replayed on every repeat.
+   *
+   * @param acc Accumulator under test.
+   * @param label Name to print for this run.
+   * @return Number of distinct Shift presses the game would observe.
+   */
+  unsigned run_scenario(ModifierAccumulator &acc, const char *label) {
+    std::printf("%s\n", label);
 
-  // Scenario: the player holds Left Shift to sprint, then holds W to run forward.
-  // The client reports MODIFIER_SHIFT on the W packets. If shortcutFlags has not
-  // recorded Shift as held, src/input.cpp:1068 marks Shift as a synthetic modifier
-  // for W, and that decision is captured into the repeat task at src/input.cpp:1093.
-  ModifierAccumulator acc;
+    acc.submit(vk_lshift, true);
+    std::printf("  player holds Left Shift            -> shift_down=%s\n", acc.shift_is_down() ? "true" : "false");
 
-  acc.submit(vk_lshift, true);
-  std::printf("player presses and holds Left Shift -> shift_down=%s\n\n", acc.shift_is_down() ? "true" : "false");
-
-  send_key_and_modifiers(acc, vk_w, false, true);
-  std::printf("player presses W (synthetic Shift attached)\n");
-  std::printf("  after the key press, shift_down=%s   <-- Shift was never released by the player\n\n",
-              acc.shift_is_down() ? "true" : "false");
-
-  std::printf("repeat_key() now re-sends W every %.1f ms:\n", repeat_period_s * 1000.0);
-  for (int i = 0; i < repeats; ++i) {
     send_key_and_modifiers(acc, vk_w, false, true);
+    std::printf("  player presses W                   -> shift_down=%s\n", acc.shift_is_down() ? "true" : "false");
+
+    for (int i = 0; i < repeats; ++i) {
+      send_key_and_modifiers(acc, vk_w, false, true);
+    }
+
+    const double elapsed_s = repeats * repeat_period_s;
+    const auto presses = acc.shift_presses();
+
+    std::printf("  after %d repeats over %.2f s        -> shift_down=%s\n",
+                repeats, elapsed_s, acc.shift_is_down() ? "true" : "false");
+    std::printf("  transitions seen by the game:         %u\n", acc.transitions());
+    std::printf("  distinct Shift presses:               %u", presses);
+    if (presses > 1) {
+      std::printf("   <-- oscillating at %.1f Hz",
+                  elapsed_s > 0 ? static_cast<double>(presses - 1) / elapsed_s : 0.0);
+    }
+    std::printf("\n\n");
+
+    return presses;
   }
 
-  const double elapsed_s = repeats * repeat_period_s;
-  std::printf("  %d repeats over %.2f s\n\n", repeats, elapsed_s);
+}  // namespace
 
-  std::printf("Result\n------\n");
-  std::printf("Shift down->up->down transitions observed by the game: %u\n", acc.transitions());
-  std::printf("Distinct Shift presses:                                %u\n", acc.shift_presses());
-  std::printf("Oscillation rate:                                      %.1f Hz\n",
-              elapsed_s > 0 ? static_cast<double>(acc.shift_presses() - 1) / elapsed_s : 0.0);
-  std::printf("Shift physically released by the player:               never\n\n");
+int main() {
+  std::printf("Held-modifier oscillation: regression test\n");
+  std::printf("=========================================\n\n");
+  std::printf("Scenario: Left Shift held for the whole run, never released by the player.\n");
+  std::printf("A correct backend reports exactly one Shift press.\n\n");
 
-  const bool defect_reproduced = acc.shift_presses() > 1;
-  if (defect_reproduced) {
-    std::printf("DEFECT REPRODUCED: a continuously held Shift is reported as pressed %u times.\n",
-                acc.shift_presses());
-    std::printf("The synthetic release clears NX_DEVICELSHIFTKEYMASK, which is the same bit the\n");
-    std::printf("physically held Left Shift set, so the accumulator drops the generic Shift flag.\n");
-    return 1;
+  ModifierAccumulator shared_backend;
+  const auto shared_presses = run_scenario(shared_backend, "libvirtualhid shared backend (macos_backend.cpp:483-490)");
+
+  RefCountedAccumulator solari_backend;
+  const auto solari_presses = run_scenario(solari_backend, "Solari native backend (src/platform/macos/input.cpp)");
+
+  std::printf("Verdict\n-------\n");
+
+  bool ok = true;
+  if (shared_presses > 1) {
+    std::printf("defect reproduced in the shared backend: %u presses for one held key\n", shared_presses);
+  } else {
+    std::printf("UNEXPECTED: the shared backend did not reproduce the defect\n");
+    ok = false;
   }
 
-  std::printf("PASS: the held Shift stayed down for the whole sequence.\n");
-  return 0;
+  if (solari_presses == 1 && solari_backend.shift_is_down()) {
+    std::printf("Solari backend holds the modifier down: 1 press, still held at the end\n");
+  } else {
+    std::printf("FAIL: Solari backend reported %u presses, held=%s\n",
+                solari_presses, solari_backend.shift_is_down() ? "true" : "false");
+    ok = false;
+  }
+
+  std::printf("\n%s\n", ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
 }
