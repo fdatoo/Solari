@@ -64,6 +64,7 @@ static const useconds_t kAdoptionPollInterval = 50000;
 @property(nonatomic, assign) CGDirectDisplayID displayID;
 @property(nonatomic, assign) int width;
 @property(nonatomic, assign) int height;
+@property(nonatomic, assign) BOOL hiDPI;
 @end
 
 @implementation SolariVirtualDisplay
@@ -153,17 +154,13 @@ static const useconds_t kAdoptionPollInterval = 50000;
     return nil;
   }
 
+  // The mode is registered at the point size. With hiDPI set, the window server
+  // backs those points with twice as many pixels in each axis, so a display asked
+  // for 1920x1080 points renders into 3840x2160 pixels.
   CGVirtualDisplaySettings *settings = [[settingsClass alloc] init];
-  NSMutableArray *modes = [NSMutableArray array];
-  [modes addObject:[[modeClass alloc] initWithWidth:(uint32_t) width height:(uint32_t) height refreshRate:refreshRate]];
-
-  // HiDPI needs the half size partner mode registered alongside the native one,
-  // or the window server hands back a display at half the requested resolution.
-  if (hiDPI && width >= 2 && height >= 2) {
-    [modes addObject:[[modeClass alloc] initWithWidth:(uint32_t) (width / 2)
-                                              height:(uint32_t) (height / 2)
-                                         refreshRate:refreshRate]];
-  }
+  NSArray *modes = @[
+    [[modeClass alloc] initWithWidth:(uint32_t) width height:(uint32_t) height refreshRate:refreshRate]
+  ];
 
   settings.modes = modes;
   settings.hiDPI = hiDPI ? 1 : 0;
@@ -175,6 +172,7 @@ static const useconds_t kAdoptionPollInterval = 50000;
 
   instance.display = display;
   instance.displayID = [display displayID];
+  instance.hiDPI = hiDPI;
   instance.width = width;
   instance.height = height;
 
@@ -183,6 +181,9 @@ static const useconds_t kAdoptionPollInterval = 50000;
   const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + kAdoptionTimeout;
   while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
     if ([SolariVirtualDisplay isDisplayActive:instance.displayID]) {
+      if (hiDPI) {
+        [instance selectHiDPIMode];
+      }
       return instance;
     }
     usleep(kAdoptionPollInterval);
@@ -190,6 +191,52 @@ static const useconds_t kAdoptionPollInterval = 50000;
 
   NSLog(@"[sunshine] virtual display %u was created but never became active", instance.displayID);
   return nil;
+}
+
+/**
+ * @brief Switch the display to its HiDPI mode.
+ *
+ * Setting hiDPI on the descriptor builds the doubled backing store, but the
+ * window server still presents the 1x interpretation of it, which renders the
+ * desktop at one device pixel per point and makes everything look tiny. The
+ * HiDPI mode is a scaled duplicate, so it only appears in the mode list when
+ * duplicates are asked for, and it has to be selected explicitly.
+ */
+- (void)selectHiDPIMode {
+  NSDictionary *options = @{(__bridge NSString *) kCGDisplayShowDuplicateLowResolutionModes: @YES};
+  CFArrayRef modes = CGDisplayCopyAllDisplayModes(self.displayID, (__bridge CFDictionaryRef) options);
+  if (!modes) {
+    return;
+  }
+
+  CGDisplayModeRef best = NULL;
+  for (CFIndex i = 0; i < CFArrayGetCount(modes); ++i) {
+    CGDisplayModeRef mode = (CGDisplayModeRef) CFArrayGetValueAtIndex(modes, i);
+
+    // A HiDPI mode is one whose backing store is denser than its point size.
+    if (CGDisplayModeGetPixelWidth(mode) <= CGDisplayModeGetWidth(mode)) {
+      continue;
+    }
+    if (!best || CGDisplayModeGetPixelWidth(mode) > CGDisplayModeGetPixelWidth(best)) {
+      best = mode;
+    }
+  }
+
+  if (!best) {
+    NSLog(@"[sunshine] no HiDPI mode was offered for the virtual display");
+    CFRelease(modes);
+    return;
+  }
+
+  CGDisplayConfigRef configuration = NULL;
+  if (CGBeginDisplayConfiguration(&configuration) == kCGErrorSuccess && configuration) {
+    CGConfigureDisplayWithDisplayMode(configuration, self.displayID, best, NULL);
+    if (CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession) != kCGErrorSuccess) {
+      CGCancelDisplayConfiguration(configuration);
+    }
+  }
+
+  CFRelease(modes);
 }
 
 - (void)dealloc {
