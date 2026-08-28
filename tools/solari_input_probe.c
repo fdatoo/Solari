@@ -73,6 +73,14 @@ static unsigned long key_downs = 0, key_ups = 0, flags_events = 0;
 static unsigned long motion_events = 0, scroll_events = 0, button_events = 0;
 static unsigned long integral_deltas = 0, zero_deltas = 0;
 
+/* A flags_changed event that does not change the flag word tells a consumer
+   nothing, but a game that toggles state per event still reacts to it. Counting
+   these separately is what distinguishes "the flag is steady" from "the game is
+   being told about the modifier over and over". */
+static unsigned long redundant_flags_events = 0;
+static CGEventFlags previous_flags = 0;
+static bool previous_flags_valid = false;
+
 static double *motion_gaps_ms = NULL;
 static size_t motion_gap_count = 0;
 static uint64_t last_motion_ns = 0;
@@ -197,6 +205,11 @@ static CGEventRef on_event(CGEventTapProxy proxy, CGEventType type, CGEventRef e
       key_ups++;
     } else {
       flags_events++;
+      if (previous_flags_valid && flags == previous_flags) {
+        redundant_flags_events++;
+      }
+      previous_flags = flags;
+      previous_flags_valid = true;
     }
     track_modifiers(flags, timestamp_ns);
   } else if (is_motion(type)) {
@@ -259,6 +272,20 @@ static void print_summary(double duration_s) {
   printf("flags_changed       %lu\n", flags_events);
   printf("mouse motion        %lu\n", motion_events);
   printf("scroll / button     %lu / %lu\n", scroll_events, button_events);
+
+  if (flags_events > 0) {
+    printf("\n-- flags_changed events --\n");
+    printf("total               %lu\n", flags_events);
+    printf("redundant           %lu", redundant_flags_events);
+    if (duration_s > 0 && redundant_flags_events > 0) {
+      printf("  (%.0f/s)", (double) redundant_flags_events / duration_s);
+    }
+    printf("\n");
+    if (redundant_flags_events > 2) {
+      printf("NOTE: these announce a modifier whose state did not change. A game that\n");
+      printf("      toggles on each event will flicker even though the flag is steady.\n");
+    }
+  }
 
   printf("\n-- modifier transitions (a held modifier should show exactly 1 down) --\n");
   bool any_modifier = false;

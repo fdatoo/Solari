@@ -415,7 +415,20 @@ namespace platf {
         modifier_flags_t modifier;
         const auto key_index = key_index_for(key_code);
         if (key_index >= 0 && modifier_flags_for_key(*key, modifier)) {
+          const auto before = keyboard_flags_;
           apply_modifier(key_index, release);
+
+          // A flags event that carries the same flag word says nothing, but a game
+          // that tracks the modifier per event rather than by diffing the word will
+          // read each one as a fresh press or release. The synthetic modifier that
+          // brackets every repeated key produces a stream of exactly those, which
+          // is what makes a held Shift flicker in game even while the flag itself
+          // never moves. Emit only genuine changes.
+          if (keyboard_flags_ == before) {
+            CFRelease(event);
+            return;
+          }
+
           CGEventSetType(event, kCGEventFlagsChanged);
         } else {
           CGEventSetType(event, release ? kCGEventKeyUp : kCGEventKeyDown);

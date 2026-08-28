@@ -17,6 +17,28 @@ is_running() {
   pgrep -f "Sunshine.app/Contents/MacOS/Sunshine" >/dev/null 2>&1
 }
 
+# A rebuild changes the binary, and macOS ties Screen Recording and Accessibility
+# grants for an ad-hoc signed app to that exact binary, so every rebuild silently
+# revokes them. Signing with a real certificate instead ties the grants to the
+# certificate, which survives rebuilds. Set SOLARI_SIGN_ID to one of the identities
+# from `security find-identity -v -p codesigning` to get that.
+sign_app() {
+  if [[ -n "${SOLARI_SIGN_ID:-}" ]]; then
+    if codesign --force --deep --sign "$SOLARI_SIGN_ID" "$APP" >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "warning: signing with SOLARI_SIGN_ID failed, falling back to ad-hoc." >&2
+    echo "         run codesign yourself in Terminal if this persists." >&2
+  fi
+
+  # Never downgrade an existing real signature to ad-hoc.
+  if codesign -dvvv "$APP" 2>&1 | grep -q "^Authority="; then
+    return 0
+  fi
+
+  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+}
+
 stop_server() {
   if is_running; then
     pkill -f "Sunshine.app/Contents/MacOS/Sunshine" || true
@@ -38,9 +60,7 @@ start_server() {
     exit 1
   fi
 
-  # Re-sign after every rebuild. The signature is what macOS ties the Screen
-  # Recording and Accessibility grants to, and a rebuild invalidates it.
-  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+  sign_app
 
   open "$APP" --args "$CONFIG"
   sleep 4
@@ -105,8 +125,19 @@ case "${1:-status}" in
     sleep 1
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
     ;;
+  reset-permissions)
+    # Clears the stale grants a rebuild leaves behind, so the panes stop showing an
+    # app as approved when macOS no longer considers it the same app.
+    stop_server
+    tccutil reset ScreenCapture dev.lizardbyte.app.Sunshine || true
+    tccutil reset Accessibility dev.lizardbyte.app.Sunshine || true
+    start_server
+    echo
+    echo "now re-enable Sunshine in both panes:"
+    echo "  $0 permissions"
+    ;;
   *)
-    echo "usage: $0 start|stop|restart|status|log|probe|permissions" >&2
+    echo "usage: $0 start|stop|restart|status|log|probe|permissions|reset-permissions" >&2
     exit 2
     ;;
 esac
