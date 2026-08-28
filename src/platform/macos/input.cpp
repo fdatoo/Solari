@@ -377,7 +377,7 @@ namespace platf {
     /**
      * @brief Shared CoreGraphics input state for the process.
      *
-     * The event sources and the modifier press counts are process wide because
+     * The event sources and the held key state are process wide because
      * CoreGraphics injection is itself process wide. Every mutation is guarded so
      * the control stream thread and the task pool thread cannot interleave.
      */
@@ -389,7 +389,7 @@ namespace platf {
       }
 
       /**
-       * @brief Post a keyboard event, maintaining reference counted modifier state.
+       * @brief Post a keyboard event, updating held modifier state.
        *
        * @param key_code Portable key code from the client.
        * @param release Whether this is a key release.
@@ -719,7 +719,7 @@ namespace platf {
        * sends VKEY_LSHIFT, the two occupy different slots and the synthetic release
        * cannot clear a modifier the player is still holding.
        *
-       * @param slot Tracking slot for the portable key code.
+       * @param key_index Index of the portable key code in the key map.
        * @param release Whether this is a release.
        */
       void apply_modifier(int key_index, bool release) {
