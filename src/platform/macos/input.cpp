@@ -405,6 +405,8 @@ namespace platf {
           return;
         }
 
+        elevate_calling_thread_once();
+
         const auto event = CGEventCreateKeyboardEvent(keyboard_source_, *key, !release);
         if (!event) {
           return;
@@ -769,6 +771,27 @@ namespace platf {
       }
 
       /**
+       * @brief Raise the injecting thread to interactive priority, once.
+       *
+       * Every injection arrives on Sunshine's single task pool worker
+       * (task_pool.start(1), src/main.cpp), which runs at default priority and is
+       * shared with key repeat and other deferred work. At default priority that
+       * thread can be descheduled between packets, which shows up as motion
+       * arriving in clumps rather than at the rate the client sent it. The mapping
+       * to QOS_CLASS_USER_INTERACTIVE already exists; nothing on the input path
+       * was asking for it.
+       */
+      void elevate_calling_thread_once() {
+        static thread_local bool elevated = false;
+        if (elevated) {
+          return;
+        }
+
+        elevated = true;
+        adjust_thread_priority(thread_priority_e::critical);
+      }
+
+      /**
        * @brief Adopt the system cursor position when this backend has not tracked it.
        */
       void sync_position_if_needed() {
@@ -841,6 +864,8 @@ namespace platf {
         if (!source_) {
           return;
         }
+
+        elevate_calling_thread_once();
 
         const auto event = CGEventCreateMouseEvent(source_, type, position_, button);
         if (!event) {
