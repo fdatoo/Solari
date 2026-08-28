@@ -284,14 +284,42 @@ as Lumen did.
 
 ## 5. Phasing
 
-Status as of 2026-08-27: phase 0 is done and phase 1 has landed its first
-increment on branch `solari/phase-0-bootstrap`. Upstream is forked to
-`fdatoo/Solari` at `377e07ce` and builds on macOS 26 (Xcode 21, tray and docs
-off for now, so Qt is not yet a dependency). Both diagnostic tools are built.
-The native input backend at `src/platform/macos/input.cpp` replaces the
-libvirtualhid shim on Apple and fixes the modifier oscillation and the
-per-move cursor warp. It has been through two review passes; what remains is
-verification against a real client, which needs a streaming session.
+Status as of 2026-08-27: phases 0 and 1 are done, on branch
+`solari/phase-0-bootstrap`. Upstream is forked to `fdatoo/Solari` at `377e07ce`
+and builds on macOS 26 (Xcode 21, tray and docs off for now, so Qt is not yet a
+dependency).
+
+Phase 1 is verified against a real Moonlight client, not just in test. Both
+reported defects are fixed and accepted by the user:
+
+- Held modifiers no longer oscillate. Two rounds were needed. Keeping the flag
+  word steady was not enough, because the backend still posted a flags event
+  for every synthetic modifier press and release, roughly fifty a second. A
+  game reading the modifier per event rather than by diffing the flag word
+  still flickered. Flags events are now emitted only on a genuine change.
+- Mouse motion is much improved, from removing the per-move cursor warp.
+
+What the measurements settled, so it is not re-litigated later:
+
+- Remaining motion spread is not ours. `pacing_generator` posts locally at a
+  fixed rate through the same injection path: posts leave with 0.81 ms spread
+  and arrive with 1.30 ms, against 13.74 ms during a stream. Roughly 12 ms is
+  introduced before injection, in the client or the network (Tailscale is the
+  leading suspect and was not ruled out).
+- Thread QoS was not the bottleneck. Elevating the injecting thread to
+  `USER_INTERACTIVE` changed nothing measurable. It is kept because it is
+  correct, not because it helped.
+- Relative mouse batching in `src/input.cpp:1585` is dead code upstream: the
+  overflow test is inverted, so batching terminates whenever the addition is
+  safe. Harmless in practice, and it means batching was never collapsing
+  motion. Worth reporting upstream.
+
+Operational note for future sessions: the app must be signed with a real
+certificate (`SOLARI_SIGN_ID`), otherwise macOS ties Screen Recording and
+Accessibility to the exact binary and every rebuild silently revokes them.
+Signing has to happen from the user's own Terminal; an agent shell runs in a
+Background security session that cannot reach the keychain. See
+`scripts/solari-dev.sh`.
 
 Each phase ships something testable on the Mac Studio via a real Moonlight
 client.
