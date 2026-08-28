@@ -198,3 +198,73 @@ static const useconds_t kAdoptionPollInterval = 50000;
 }
 
 @end
+
+#pragma mark - Shared instance
+
+/**
+ * The virtual display is shared for the process rather than owned per capture.
+ * platf::display() runs several times while encoders are probed, and creating one
+ * per call left a trail of displays behind and rearranged the desktop each time.
+ */
+static SolariVirtualDisplay *g_shared_display = nil;
+static int g_shared_width = 0;
+static int g_shared_height = 0;
+static double g_shared_refresh = 0;
+static NSLock *g_shared_lock = nil;
+
+__attribute__((constructor)) static void solari_virtual_display_init(void) {
+  g_shared_lock = [[NSLock alloc] init];
+}
+
+CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate) {
+  if (width <= 0 || height <= 0) {
+    return 0;
+  }
+
+  [g_shared_lock lock];
+
+  // Reuse whatever is already there when the geometry matches, so a probe run
+  // does not tear the desktop apart once per encoder.
+  if (g_shared_display && g_shared_width == width && g_shared_height == height && g_shared_refresh == refreshRate) {
+    const CGDirectDisplayID existing = g_shared_display.displayID;
+    [g_shared_lock unlock];
+    return existing;
+  }
+
+  g_shared_display = nil;
+
+  SolariVirtualDisplay *created = [SolariVirtualDisplay displayWithWidth:width
+                                                                 height:height
+                                                            refreshRate:refreshRate
+                                                                  hiDPI:NO];
+  if (!created) {
+    g_shared_width = g_shared_height = 0;
+    g_shared_refresh = 0;
+    [g_shared_lock unlock];
+    return 0;
+  }
+
+  g_shared_display = created;
+  g_shared_width = width;
+  g_shared_height = height;
+  g_shared_refresh = refreshRate;
+
+  const CGDirectDisplayID displayID = created.displayID;
+  [g_shared_lock unlock];
+  return displayID;
+}
+
+void solari_virtual_display_release(void) {
+  [g_shared_lock lock];
+  g_shared_display = nil;
+  g_shared_width = g_shared_height = 0;
+  g_shared_refresh = 0;
+  [g_shared_lock unlock];
+}
+
+CGDirectDisplayID solari_virtual_display_current(void) {
+  [g_shared_lock lock];
+  const CGDirectDisplayID displayID = g_shared_display ? g_shared_display.displayID : 0;
+  [g_shared_lock unlock];
+  return displayID;
+}

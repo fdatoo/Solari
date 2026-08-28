@@ -976,4 +976,8 @@ namespace platf {
     macos_input_t::get().reset_modifiers();
   }
 
+  void macos_input_set_display(CGDirectDisplayID display) {
+    macos_input_t::get().set_display(display);
+  }
+
 }  // namespace platf

@@ -33,6 +33,7 @@
 
 // local includes
 #include "misc.h"
+#include "src/platform/macos/virtual_display.h"
 #include "src/entry_handler.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -298,6 +299,11 @@ namespace platf {
     // A client that disconnects mid-keypress never sends the release, which would
     // otherwise leave a modifier asserted against the local user's desktop.
     macos_input_reset_modifiers();
+
+    // The virtual display exists for the session that asked for it, so it goes
+    // away with the session rather than lingering on the desktop.
+    solari_virtual_display_release();
+    macos_input_set_display(CGMainDisplayID());
   }
 
   static pid_t g_restart_child_pid = 0;  ///< PID of the restarted child process for signal forwarding.

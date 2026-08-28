@@ -51,4 +51,41 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Acquire the shared virtual display, creating it if needed.
+ *
+ * One display is shared for the process. platf::display() is called repeatedly
+ * while probing encoders, and creating a display per call both accumulated them
+ * and made the desktop rearrange on every probe.
+ *
+ * @param width Width in pixels.
+ * @param height Height in pixels.
+ * @param refreshRate Refresh rate in Hz.
+ * @return Display id, or 0 when no virtual display could be provided.
+ */
+CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate);
+
+/**
+ * @brief Release the shared virtual display.
+ *
+ * Called when streaming stops, so the display does not outlive the session that
+ * asked for it.
+ */
+void solari_virtual_display_release(void);
+
+/**
+ * @brief Id of the shared virtual display, if one exists.
+ *
+ * @return Display id, or 0.
+ */
+CGDirectDisplayID solari_virtual_display_current(void);
+
+#ifdef __cplusplus
+}
+#endif
+
 NS_ASSUME_NONNULL_END

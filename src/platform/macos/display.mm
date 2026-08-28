@@ -228,15 +228,11 @@ namespace platf {
     CGDirectDisplayID display_id {};  ///< Display ID.
     std::unique_ptr<display_device::DisplayPowerGuardInterface> display_power_guard;  ///< Display power guard.
     std::uint16_t peak_luminance {};  ///< Display peak luminance in nits.
-    SolariVirtualDisplay *virtual_display {};  ///< Virtual display being captured, if any.
 
     ~sc_display_t() override {
       [sc_capture stopCapture];
       [sc_capture release];
 
-      // Released after capture has stopped, since letting the display disappear
-      // from under a running stream is what makes the window server unhappy.
-      [virtual_display release];
     }
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
@@ -497,25 +493,15 @@ namespace platf {
 
     // A display created at exactly the client's resolution removes scaling from
     // the pipeline entirely, which is the only way to get a genuinely 1:1 image.
-    SolariVirtualDisplay *virtual_display {};
     if (config::video.virtual_display == "enabled" && config.width > 0 && config.height > 0) {
       if (![SolariVirtualDisplay isSupported]) {
         BOOST_LOG(warning) << "Virtual displays are not available on this version of macOS."sv;
+      } else if (const auto virtual_id {solari_virtual_display_acquire(config.width, config.height, config.framerate)}) {
+        display_id = virtual_id;
+        BOOST_LOG(info) << "Capturing virtual display ("sv << display_id << ") at "sv
+                        << config.width << 'x' << config.height << " @ "sv << config.framerate << "Hz"sv;
       } else {
-        // Retained explicitly: this file is manual retain and release, and the
-        // factory method hands back an autoreleased object, which would take the
-        // display away at the next pool drain.
-        virtual_display = [[SolariVirtualDisplay displayWithWidth:config.width
-                                                           height:config.height
-                                                      refreshRate:config.framerate
-                                                            hiDPI:NO] retain];
-        if (virtual_display) {
-          display_id = virtual_display.displayID;
-          BOOST_LOG(info) << "Created a virtual display ("sv << display_id << ") at "sv
-                          << config.width << 'x' << config.height << " @ "sv << config.framerate << "Hz"sv;
-        } else {
-          BOOST_LOG(warning) << "Could not create a virtual display, capturing the physical one instead."sv;
-        }
+        BOOST_LOG(warning) << "Could not create a virtual display, capturing the physical one instead."sv;
       }
     }
 
@@ -536,7 +522,6 @@ namespace platf {
     if ([SCVideo isSupported] && sck_format_supported) {
       auto display = std::make_shared<sc_display_t>();
       display->display_id = display_id;
-      display->virtual_display = virtual_display;
       display->display_power_guard = display_device::keep_display_awake("Sunshine display capture");
       if (display->display_power_guard) {
         BOOST_LOG(debug) << "Keeping display awake for capture"sv;
@@ -562,6 +547,10 @@ namespace platf {
           [display->sc_capture setFrameWidth:config.width frameHeight:config.height];
         }
 
+        // Without this the cursor stays clamped to the main display's bounds and
+        // cannot reach a virtual display at all.
+        macos_input_set_display(display_id);
+
         BOOST_LOG(info) << "Using ScreenCaptureKit capture"sv;
         BOOST_LOG(info) << "Display native resolution is "sv << (int) native.width << 'x' << (int) native.height
                         << ", streaming at "sv << config.width << 'x' << config.height;
@@ -577,14 +566,6 @@ namespace platf {
       BOOST_LOG(warning) << "ScreenCaptureKit setup failed, falling back to AVFoundation."sv;
     } else if ([SCVideo isSupported]) {
       BOOST_LOG(info) << "ScreenCaptureKit cannot deliver the requested pixel format, using AVFoundation."sv;
-    }
-
-    if (virtual_display) {
-      // The fallback path has nowhere to keep it alive for the session.
-      BOOST_LOG(warning) << "Falling back to AVFoundation, releasing the virtual display."sv;
-      [virtual_display release];
-      virtual_display = nullptr;
-      display_id = CGMainDisplayID();
     }
 
     auto display = std::make_shared<av_display_t>();
@@ -614,6 +595,8 @@ namespace platf {
       [display->av_capture setFrameWidth:config.width frameHeight:config.height];
       display->av_capture.pixelFormat = pixel_format;
     }
+
+    macos_input_set_display(display->display_id);
 
     BOOST_LOG(info) << "Using AVFoundation capture (SDR only)"sv;
     return display;
