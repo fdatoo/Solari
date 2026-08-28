@@ -271,43 +271,25 @@ namespace platf {
     };
 
     /**
-     * @brief Portable key codes that carry modifier state.
+     * @brief Resolve a portable key code to its index in the key map.
      *
      * Held state is tracked per portable code rather than per macOS key, because
-     * several of these collapse onto one macOS key. The generic VKEY_SHIFT is what
-     * the common layer sends for a synthetic modifier (src/input.cpp:989), while a
-     * real keyboard sends VKEY_LSHIFT or VKEY_RSHIFT; both resolve to kVK_Shift.
-     * Keeping them apart is what stops a synthetic release from clearing a modifier
-     * the player is physically holding.
-     */
-    constexpr std::array<uint16_t, 11> modifier_portable_codes {
-      0x10,  // VKEY_SHIFT
-      0xA0,  // VKEY_LSHIFT
-      0xA1,  // VKEY_RSHIFT
-      0x11,  // VKEY_CONTROL
-      0xA2,  // VKEY_LCONTROL
-      0xA3,  // VKEY_RCONTROL
-      0x12,  // VKEY_MENU
-      0xA4,  // VKEY_LMENU
-      0xA5,  // VKEY_RMENU
-      0x5B,  // VKEY_LWIN
-      0x5C,  // VKEY_RWIN
-    };
-
-    /**
-     * @brief Find the tracking slot for a portable key code.
+     * several portable codes collapse onto one macOS key. The generic VKEY_SHIFT is
+     * what the common layer sends for a synthetic modifier (src/input.cpp:989),
+     * while a real keyboard sends VKEY_LSHIFT; both resolve to kVK_Shift. Keeping
+     * them apart is what stops a synthetic release from clearing a modifier the
+     * player is physically holding.
      *
      * @param key_code Portable key code from the client.
-     * @return Slot index, or -1 when the key carries no modifier state.
+     * @return Index into the key map, or -1 when the key is unmapped.
      */
-    int modifier_slot_for(uint16_t key_code) {
-      for (std::size_t i = 0; i < modifier_portable_codes.size(); ++i) {
-        if (modifier_portable_codes[i] == key_code) {
-          return static_cast<int>(i);
-        }
+    int key_index_for(uint16_t key_code) {
+      const auto position = std::ranges::lower_bound(key_code_map, static_cast<int>(key_code), {}, &key_code_map_t::portable_key_code);
+      if (position == key_code_map.end() || position->portable_key_code != key_code || position->macos_key_code < 0) {
+        return -1;
       }
 
-      return -1;
+      return static_cast<int>(std::distance(key_code_map.begin(), position));
     }
 
     /**
@@ -430,9 +412,10 @@ namespace platf {
 
         CGEventSetIntegerValueField(event, kCGKeyboardEventKeycode, *key);
 
-        const auto slot = modifier_slot_for(key_code);
-        if (slot >= 0) {
-          apply_modifier(slot, release);
+        modifier_flags_t modifier;
+        const auto key_index = key_index_for(key_code);
+        if (key_index >= 0 && modifier_flags_for_key(*key, modifier)) {
+          apply_modifier(key_index, release);
           CGEventSetType(event, kCGEventFlagsChanged);
         } else {
           CGEventSetType(event, release ? kCGEventKeyUp : kCGEventKeyDown);
@@ -664,7 +647,7 @@ namespace platf {
       void reset_modifiers() {
         std::lock_guard lock {mutex_};
 
-        const auto anything_held = std::ranges::any_of(modifier_held_, [](bool held) {
+        const auto anything_held = std::ranges::any_of(key_held_, [](bool held) {
           return held;
         });
         if (keyboard_flags_ == 0 && !anything_held) {
@@ -690,7 +673,7 @@ namespace platf {
         CFRelease(event);
 
         // Only forget the state once the release has actually been announced.
-        modifier_held_.fill(false);
+        key_held_.fill(false);
         keyboard_flags_ = 0;
       }
 
@@ -739,32 +722,29 @@ namespace platf {
        * @param slot Tracking slot for the portable key code.
        * @param release Whether this is a release.
        */
-      void apply_modifier(int slot, bool release) {
-        modifier_held_[slot] = !release;
+      void apply_modifier(int key_index, bool release) {
+        key_held_[key_index] = !release;
         rebuild_modifier_flags();
       }
 
       /**
        * @brief Recompute the flag word from the set of held modifier keys.
        *
-       * Deriving the whole word each time means the flags cannot drift out of step
-       * with the held state, whatever order events arrive in.
+       * Derived from the key map rather than a hand written list, so a portable code
+       * that maps to a modifier cannot be missed. Rebuilding the whole word each time
+       * means the flags cannot drift out of step with the held keys, whatever order
+       * events arrive in.
        */
       void rebuild_modifier_flags() {
         CGEventFlags flags = 0;
 
-        for (std::size_t i = 0; i < modifier_portable_codes.size(); ++i) {
-          if (!modifier_held_[i]) {
-            continue;
-          }
-
-          const auto key = macos_key_code(modifier_portable_codes[i]);
-          if (!key) {
+        for (std::size_t i = 0; i < key_code_map.size(); ++i) {
+          if (!key_held_[i] || key_code_map[i].macos_key_code < 0) {
             continue;
           }
 
           modifier_flags_t modifier;
-          if (modifier_flags_for_key(*key, modifier)) {
+          if (modifier_flags_for_key(static_cast<CGKeyCode>(key_code_map[i].macos_key_code), modifier)) {
             flags |= modifier.generic | modifier.device;
           }
         }
@@ -873,7 +853,7 @@ namespace platf {
       bool position_known_ = false;
       int scroll_lines_per_detent_ = default_scroll_lines_per_detent;
       CGEventFlags keyboard_flags_ {};
-      std::array<bool, modifier_portable_codes.size()> modifier_held_ {};
+      std::array<bool, key_code_map.size()> key_held_ {};  ///< Held state per portable key code.
       std::array<bool, 3> button_down_ {};
       std::array<std::array<std::chrono::steady_clock::time_point, 2>, 3> last_button_event_ {};
     };
