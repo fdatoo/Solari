@@ -75,8 +75,12 @@ static const useconds_t kAdoptionPollInterval = 50000;
  */
 @property(nonatomic, assign) BOOL hiDPIVerified;
 
+/// Whether the display has been verified as the main display.
+@property(nonatomic, assign) BOOL primaryVerified;
+
 - (BOOL)selectHiDPIMode;
 - (BOOL)isHiDPIActive;
+- (BOOL)makePrimaryOutOfProcess;
 @end
 
 @implementation SolariVirtualDisplay
@@ -204,6 +208,8 @@ static const useconds_t kAdoptionPollInterval = 50000;
           NSLog(@"[sunshine] HiDPI mode selection did not take on the virtual display");
         }
       }
+
+      instance.primaryVerified = [instance makePrimaryOutOfProcess];
       return instance;
     }
     usleep(kAdoptionPollInterval);
@@ -235,13 +241,23 @@ static const useconds_t kAdoptionPollInterval = 50000;
  * @return True when the child verified a HiDPI mode is presenting.
  */
 - (BOOL)selectHiDPIModeOutOfProcess {
+  return [self runHelper:"--vd-select-hidpi"];
+}
+
+/**
+ * @brief Re-execute this binary with a helper flag targeting this display.
+ *
+ * @param flag Helper mode argument.
+ * @return True when the child exited reporting verified success.
+ */
+- (BOOL)runHelper:(const char *)flag {
   NSString *executable = [[NSBundle mainBundle] executablePath];
   if (!executable) {
     return NO;
   }
 
   NSString *displayArgument = [NSString stringWithFormat:@"%u", self.displayID];
-  const char *argv[] = {executable.fileSystemRepresentation, "--vd-select-hidpi", displayArgument.UTF8String, NULL};
+  const char *argv[] = {executable.fileSystemRepresentation, flag, displayArgument.UTF8String, NULL};
 
   pid_t child = 0;
   if (posix_spawn(&child, argv[0], NULL, NULL, (char *const *) argv, NULL) != 0) {
@@ -264,8 +280,22 @@ static const useconds_t kAdoptionPollInterval = 50000;
 
   kill(child, SIGKILL);
   waitpid(child, NULL, 0);
-  NSLog(@"[sunshine] HiDPI selection helper timed out");
+  NSLog(@"[sunshine] display helper %s timed out", flag);
   return NO;
+}
+
+/**
+ * @brief Make this display the main one, out of process.
+ *
+ * The menu bar, dock, and newly opened windows follow the main display, so an
+ * extended virtual display streams an empty desktop. The in-server attempt at
+ * this was silently renormalised away, which in hindsight was the same
+ * unreliable in-server display configuration that broke mode selection.
+ *
+ * @return True when the child verified this display is main.
+ */
+- (BOOL)makePrimaryOutOfProcess {
+  return [self runHelper:"--vd-make-primary"];
 }
 
 - (BOOL)selectHiDPIMode {
@@ -414,6 +444,70 @@ int solari_vd_select_hidpi_main(uint32_t display_id) {
   return 1;
 }
 
+int solari_vd_make_primary_main(uint32_t display_id) {
+  // Runs in a fresh process where display configuration genuinely applies. The
+  // display sitting at the origin is the main one, so the target goes to (0,0)
+  // and every other display is laid out to its right, preserving order.
+  const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 4.0;
+
+  while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
+    if (CGDisplayIsMain(display_id)) {
+      return 0;
+    }
+
+    uint32_t count = 0;
+    CGDirectDisplayID ids[32];
+    if (CGGetActiveDisplayList(32, ids, &count) != kCGErrorSuccess || count == 0) {
+      usleep(100000);
+      continue;
+    }
+
+    bool target_active = false;
+    for (uint32_t i = 0; i < count; ++i) {
+      if (ids[i] == display_id) {
+        target_active = true;
+      }
+    }
+    if (!target_active) {
+      usleep(100000);
+      continue;
+    }
+
+    CGDisplayConfigRef configuration = NULL;
+    if (CGBeginDisplayConfiguration(&configuration) == kCGErrorSuccess && configuration) {
+      CGError err = CGConfigureDisplayOrigin(configuration, display_id, 0, 0);
+      fprintf(stderr, "[vd-helper] origin target: %d\n", err);
+
+      int32_t next_x = (int32_t) CGDisplayBounds(display_id).size.width;
+      for (uint32_t i = 0; i < count; ++i) {
+        if (ids[i] == display_id) {
+          continue;
+        }
+        err = CGConfigureDisplayOrigin(configuration, ids[i], next_x, 0);
+        fprintf(stderr, "[vd-helper] origin %u -> %d: %d\n", ids[i], next_x, err);
+        next_x += (int32_t) CGDisplayBounds(ids[i]).size.width;
+      }
+
+      err = CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession);
+      fprintf(stderr, "[vd-helper] complete: %d\n", err);
+      if (err != kCGErrorSuccess) {
+        CGCancelDisplayConfiguration(configuration);
+      }
+    }
+
+    usleep(300000);
+
+    if (CGDisplayIsMain(display_id)) {
+      fprintf(stderr, "[vd-helper] display %u is now main\n", display_id);
+      return 0;
+    }
+
+    usleep(100000);
+  }
+
+  return 1;
+}
+
 #pragma mark - Shared instance
 
 /**
@@ -453,6 +547,9 @@ CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double r
     // a visible glitch.
     if (hiDPI && !existing.hiDPIVerified) {
       existing.hiDPIVerified = [existing selectHiDPIMode];
+    }
+    if (!existing.primaryVerified) {
+      existing.primaryVerified = [existing makePrimaryOutOfProcess];
     }
 
     return existing.displayID;

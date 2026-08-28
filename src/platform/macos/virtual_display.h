@@ -95,6 +95,14 @@ CGDirectDisplayID solari_virtual_display_current(void);
  */
 int solari_vd_select_hidpi_main(uint32_t display_id);
 
+/**
+ * @brief Entry point for the re-executed make-primary helper.
+ *
+ * @param display_id Display to place at the origin.
+ * @return 0 when the display is verified as main, 1 otherwise.
+ */
+int solari_vd_make_primary_main(uint32_t display_id);
+
 #ifdef __cplusplus
 }
 #endif
