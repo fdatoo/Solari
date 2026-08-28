@@ -336,6 +336,14 @@ namespace platf {
    * preserving Ctrl+C and terminal log output.
    */
   void restart_on_exit() {
+    // Before the fork, not after. This process is about to park itself in
+    // waitpid for the whole lifetime of its successor, so it never really dies,
+    // and a virtual display is owned by the task rather than by any file
+    // descriptor: closing fds below does nothing for it. Left alone it becomes
+    // an ownerless display on the user's desktop that blocks new ones, which is
+    // exactly the leak seen in testing.
+    solari_virtual_display_release();
+
     char executable[2048];
     uint32_t size = sizeof(executable);
     if (_NSGetExecutablePath(executable, &size) < 0) {

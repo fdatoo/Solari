@@ -59,6 +59,9 @@ static const useconds_t kAdoptionPollInterval = 50000;
 @property(readonly) CGDirectDisplayID displayID;
 @end
 
+/// Display origins as they were before the virtual display took the origin.
+static NSString *g_saved_arrangement = nil;
+
 #pragma mark - Implementation
 
 @interface SolariVirtualDisplay ()
@@ -81,6 +84,8 @@ static const useconds_t kAdoptionPollInterval = 50000;
 - (BOOL)selectHiDPIMode;
 - (BOOL)isHiDPIActive;
 - (BOOL)makePrimaryOutOfProcess;
++ (void)saveArrangementOnce;
++ (void)restoreArrangement;
 @end
 
 @implementation SolariVirtualDisplay
@@ -259,9 +264,25 @@ static const useconds_t kAdoptionPollInterval = 50000;
   NSString *displayArgument = [NSString stringWithFormat:@"%u", self.displayID];
   const char *argv[] = {executable.fileSystemRepresentation, flag, displayArgument.UTF8String, NULL};
 
+  // The server's sockets are not O_CLOEXEC, so without this the helper inherits
+  // every listening port and keeps them bound if the server dies while it runs,
+  // which stops the next instance binding them. stderr is kept for diagnostics.
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+  posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_adddup2(&actions, STDERR_FILENO, STDERR_FILENO);
+
   pid_t child = 0;
-  if (posix_spawn(&child, argv[0], NULL, NULL, (char *const *) argv, NULL) != 0) {
-    NSLog(@"[sunshine] could not spawn the HiDPI selection helper");
+  const int spawned = posix_spawn(&child, argv[0], &actions, &attributes, (char *const *) argv, NULL);
+
+  posix_spawn_file_actions_destroy(&actions);
+  posix_spawnattr_destroy(&attributes);
+
+  if (spawned != 0) {
+    NSLog(@"[sunshine] could not spawn the display helper %s", flag);
     return NO;
   }
 
@@ -295,7 +316,78 @@ static const useconds_t kAdoptionPollInterval = 50000;
  * @return True when the child verified this display is main.
  */
 - (BOOL)makePrimaryOutOfProcess {
+  [SolariVirtualDisplay saveArrangementOnce];
   return [self runHelper:"--vd-make-primary"];
+}
+
+/**
+ * @brief Record every display's origin, once, before anything moves them.
+ *
+ * Taken before the first change rather than at each attempt, so a retry cannot
+ * record the already-rearranged layout as though it were the original.
+ */
++ (void)saveArrangementOnce {
+  if (g_saved_arrangement) {
+    return;
+  }
+
+  uint32_t count = 0;
+  CGDirectDisplayID ids[32];
+  if (CGGetActiveDisplayList(32, ids, &count) != kCGErrorSuccess || count == 0) {
+    return;
+  }
+
+  NSMutableString *arrangement = [NSMutableString string];
+  for (uint32_t i = 0; i < count; ++i) {
+    const CGRect bounds = CGDisplayBounds(ids[i]);
+    [arrangement appendFormat:@"%u,%d,%d;", ids[i], (int) bounds.origin.x, (int) bounds.origin.y];
+  }
+
+  g_saved_arrangement = [arrangement copy];
+  NSLog(@"[sunshine] saved display arrangement: %@", g_saved_arrangement);
+}
+
+/**
+ * @brief Put the display arrangement back, if it was changed.
+ */
++ (void)restoreArrangement {
+  NSString *arrangement = g_saved_arrangement;
+  if (!arrangement) {
+    return;
+  }
+  g_saved_arrangement = nil;
+
+  NSString *executable = [[NSBundle mainBundle] executablePath];
+  if (!executable) {
+    return;
+  }
+
+  const char *argv[] = {
+    executable.fileSystemRepresentation,
+    "--vd-restore-arrangement",
+    arrangement.UTF8String,
+    NULL
+  };
+
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+  posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_adddup2(&actions, STDERR_FILENO, STDERR_FILENO);
+
+  pid_t child = 0;
+  const int spawned = posix_spawn(&child, argv[0], &actions, &attributes, (char *const *) argv, NULL);
+
+  posix_spawn_file_actions_destroy(&actions);
+  posix_spawnattr_destroy(&attributes);
+
+  if (spawned == 0) {
+    // Reaped best effort: another part of Sunshine reaps every child process
+    // periodically, so this may find nothing to wait for.
+    waitpid(child, NULL, 0);
+  }
 }
 
 - (BOOL)selectHiDPIMode {
@@ -473,19 +565,24 @@ int solari_vd_make_primary_main(uint32_t display_id) {
       continue;
     }
 
+    // Translate every display by the same offset so the target lands on the
+    // origin. Laying the others out in a row instead would make this display
+    // primary just as well, but it would also destroy the user's arrangement:
+    // a monitor stacked above another would come back beside it, permanently.
+    const CGRect target_bounds = CGDisplayBounds(display_id);
+    const int32_t shift_x = (int32_t) target_bounds.origin.x;
+    const int32_t shift_y = (int32_t) target_bounds.origin.y;
+
     CGDisplayConfigRef configuration = NULL;
     if (CGBeginDisplayConfiguration(&configuration) == kCGErrorSuccess && configuration) {
-      CGError err = CGConfigureDisplayOrigin(configuration, display_id, 0, 0);
-      fprintf(stderr, "[vd-helper] origin target: %d\n", err);
-
-      int32_t next_x = (int32_t) CGDisplayBounds(display_id).size.width;
+      CGError err = kCGErrorSuccess;
       for (uint32_t i = 0; i < count; ++i) {
-        if (ids[i] == display_id) {
-          continue;
-        }
-        err = CGConfigureDisplayOrigin(configuration, ids[i], next_x, 0);
-        fprintf(stderr, "[vd-helper] origin %u -> %d: %d\n", ids[i], next_x, err);
-        next_x += (int32_t) CGDisplayBounds(ids[i]).size.width;
+        const CGRect bounds = CGDisplayBounds(ids[i]);
+        const int32_t x = (int32_t) bounds.origin.x - shift_x;
+        const int32_t y = (int32_t) bounds.origin.y - shift_y;
+
+        err = CGConfigureDisplayOrigin(configuration, ids[i], x, y);
+        fprintf(stderr, "[vd-helper] origin %u -> (%d, %d): %d\n", ids[i], x, y, err);
       }
 
       err = CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession);
@@ -508,6 +605,58 @@ int solari_vd_make_primary_main(uint32_t display_id) {
   return 1;
 }
 
+int solari_vd_restore_arrangement_main(const char *arrangement) {
+  // kCGConfigureForSession persists until logout, so the rearrangement made to
+  // hand the virtual display the origin outlives both the helper and the server.
+  // kCGConfigureForAppOnly would revert, but it reverts when this helper exits,
+  // which is immediately, so it cannot be used for the change either. That
+  // leaves restoring explicitly from origins the server recorded beforehand.
+  if (!arrangement || !*arrangement) {
+    return 1;
+  }
+
+  CGDisplayConfigRef configuration = NULL;
+  if (CGBeginDisplayConfiguration(&configuration) != kCGErrorSuccess || !configuration) {
+    return 1;
+  }
+
+  const char *cursor = arrangement;
+  int restored = 0;
+  while (*cursor) {
+    unsigned int display_id = 0;
+    int x = 0;
+    int y = 0;
+    if (sscanf(cursor, "%u,%d,%d", &display_id, &x, &y) != 3) {
+      break;
+    }
+
+    // A display that has since been unplugged is skipped rather than fatal.
+    if (CGDisplayIsActive(display_id)) {
+      CGConfigureDisplayOrigin(configuration, display_id, x, y);
+      fprintf(stderr, "[vd-helper] restore %u -> (%d, %d)\n", display_id, x, y);
+      restored++;
+    }
+
+    const char *next = strchr(cursor, ';');
+    if (!next) {
+      break;
+    }
+    cursor = next + 1;
+  }
+
+  if (restored == 0) {
+    CGCancelDisplayConfiguration(configuration);
+    return 1;
+  }
+
+  if (CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession) != kCGErrorSuccess) {
+    CGCancelDisplayConfiguration(configuration);
+    return 1;
+  }
+
+  return 0;
+}
+
 #pragma mark - Shared instance
 
 /**
@@ -524,6 +673,11 @@ static NSLock *g_shared_lock = nil;
 
 __attribute__((constructor)) static void solari_virtual_display_init(void) {
   g_shared_lock = [[NSLock alloc] init];
+
+  // streaming_will_stop only fires once a session has ended, but the encoder
+  // probe creates a display before any session exists, and that one has nothing
+  // to balance it. Exit is the backstop for every path that does not stream.
+  atexit(solari_virtual_display_release);
 }
 
 CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate, BOOL hiDPI) {
@@ -581,10 +735,17 @@ CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double r
 
 void solari_virtual_display_release(void) {
   [g_shared_lock lock];
+  const BOOL had_display = g_shared_display != nil;
   g_shared_display = nil;
   g_shared_width = g_shared_height = 0;
   g_shared_refresh = 0;
   [g_shared_lock unlock];
+
+  if (had_display) {
+    // After the display is gone, so restoring cannot place anything relative to
+    // a display that is about to vanish.
+    [SolariVirtualDisplay restoreArrangement];
+  }
 }
 
 CGDirectDisplayID solari_virtual_display_current(void) {

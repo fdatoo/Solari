@@ -103,6 +103,15 @@ int solari_vd_select_hidpi_main(uint32_t display_id);
  */
 int solari_vd_make_primary_main(uint32_t display_id);
 
+/**
+ * @brief Entry point for the re-executed arrangement restore helper.
+ *
+ * @param arrangement Semicolon separated "id,x,y" triples recorded before any
+ *        display was moved.
+ * @return 0 when at least one display was restored, 1 otherwise.
+ */
+int solari_vd_restore_arrangement_main(const char *arrangement);
+
 #ifdef __cplusplus
 }
 #endif
