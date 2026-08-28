@@ -17,6 +17,7 @@
 #include <ifaddrs.h>
 
 // platform includes
+#include <ApplicationServices/ApplicationServices.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <Foundation/Foundation.h>
@@ -99,7 +100,31 @@ namespace platf {
 #pragma clang diagnostic pop
     // Record that we determined that we have the screen capture permission.
     screen_capture_allowed = true;
+
+    check_accessibility_permission();
+
     return std::make_unique<deinit_t>();
+  }
+
+  bool is_accessibility_allowed() {
+    return AXIsProcessTrusted();
+  }
+
+  void check_accessibility_permission() {
+    if (AXIsProcessTrusted()) {
+      BOOST_LOG(info) << "Accessibility permission granted, keyboard and mouse input will work"sv;
+      return;
+    }
+
+    // Injected input needs Accessibility, but CGEventPost fails silently without
+    // it: the stream looks healthy while nothing the client sends has any effect.
+    // Prompting here turns that into something the user can see and act on.
+    BOOST_LOG(error) << "No accessibility permission!"sv;
+    BOOST_LOG(error) << "Keyboard and mouse input will be silently ignored until it is granted."sv;
+    BOOST_LOG(error) << "Grant it in 'System Settings' -> 'Privacy & Security' -> 'Accessibility'"sv;
+
+    NSDictionary *options = @{(__bridge NSString *) kAXTrustedCheckOptionPrompt: @YES};
+    AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef) options);
   }
 
   fs::path appdata() {

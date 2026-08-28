@@ -19,6 +19,21 @@ namespace platf {
   bool is_screen_capture_allowed();
 
   /**
+   * @brief Check whether this process may inject keyboard and mouse events.
+   *
+   * @return True when Accessibility permission is granted.
+   */
+  bool is_accessibility_allowed();
+
+  /**
+   * @brief Report Accessibility permission and prompt for it when it is missing.
+   *
+   * Injected input fails silently without this permission, so it is checked at
+   * startup rather than left to be discovered mid-session.
+   */
+  void check_accessibility_permission();
+
+  /**
    * @brief Release every modifier the input backend still believes is held.
    *
    * Defined in src/platform/macos/input.cpp. Called when a session ends so a key
