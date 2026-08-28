@@ -665,10 +665,13 @@ namespace platf {
 
         // Clear only the bits this backend asserted. Caps lock and Fn belong to the
         // local user's keyboard, so announcing them as released would be a lie.
-        const auto system_flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
+        // These events are posted to the session tap, so the session state is what
+        // carries what this backend asserted, and subtracting from it leaves the
+        // local user's own modifiers untouched.
+        const auto session_flags = CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState);
 
         CGEventSetType(event, kCGEventFlagsChanged);
-        CGEventSetFlags(event, system_flags & ~keyboard_flags_);
+        CGEventSetFlags(event, session_flags & ~keyboard_flags_);
         CGEventPost(kCGSessionEventTap, event);
         CFRelease(event);
 

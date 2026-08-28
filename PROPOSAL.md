@@ -284,6 +284,15 @@ as Lumen did.
 
 ## 5. Phasing
 
+Status as of 2026-08-27: phase 0 is done and phase 1 has landed its first
+increment on branch `solari/phase-0-bootstrap`. Upstream is forked to
+`fdatoo/Solari` at `377e07ce` and builds on macOS 26 (Xcode 21, tray and docs
+off for now, so Qt is not yet a dependency). Both diagnostic tools are built.
+The native input backend at `src/platform/macos/input.cpp` replaces the
+libvirtualhid shim on Apple and fixes the modifier oscillation and the
+per-move cursor warp. It has been through two review passes; what remains is
+verification against a real client, which needs a streaming session.
+
 Each phase ships something testable on the Mac Studio via a real Moonlight
 client.
 
