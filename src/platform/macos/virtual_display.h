@@ -84,6 +84,17 @@ void solari_virtual_display_release(void);
  */
 CGDirectDisplayID solari_virtual_display_current(void);
 
+/**
+ * @brief Entry point for the re-executed HiDPI selection helper.
+ *
+ * Runs in a child process because mode queries fail in the server process for
+ * freshly created virtual displays. Selects and verifies the HiDPI mode.
+ *
+ * @param display_id Display to switch.
+ * @return 0 when a HiDPI mode is verified presenting, 1 otherwise.
+ */
+int solari_vd_select_hidpi_main(uint32_t display_id);
+
 #ifdef __cplusplus
 }
 #endif

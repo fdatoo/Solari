@@ -12,6 +12,9 @@
 
 // platform includes
 #import <AppKit/AppKit.h>
+#import <signal.h>
+#import <spawn.h>
+#import <sys/wait.h>
 
 // local includes
 #import "virtual_display.h"
@@ -65,6 +68,15 @@ static const useconds_t kAdoptionPollInterval = 50000;
 @property(nonatomic, assign) int width;
 @property(nonatomic, assign) int height;
 @property(nonatomic, assign) BOOL hiDPI;
+
+/**
+ * In-server CoreGraphics mode queries are unreliable for this display in both
+ * directions, so successful selection is remembered here rather than re-read.
+ */
+@property(nonatomic, assign) BOOL hiDPIVerified;
+
+- (BOOL)selectHiDPIMode;
+- (BOOL)isHiDPIActive;
 @end
 
 @implementation SolariVirtualDisplay
@@ -186,8 +198,11 @@ static const useconds_t kAdoptionPollInterval = 50000;
   const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + kAdoptionTimeout;
   while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
     if ([SolariVirtualDisplay isDisplayActive:instance.displayID]) {
-      if (hiDPI && ![instance selectHiDPIMode]) {
-        NSLog(@"[sunshine] HiDPI mode selection did not take on the virtual display");
+      if (hiDPI) {
+        instance.hiDPIVerified = [instance selectHiDPIMode];
+        if (!instance.hiDPIVerified) {
+          NSLog(@"[sunshine] HiDPI mode selection did not take on the virtual display");
+        }
       }
       return instance;
     }
@@ -207,11 +222,57 @@ static const useconds_t kAdoptionPollInterval = 50000;
  * HiDPI mode is a scaled duplicate, so it only appears in the mode list when
  * duplicates are asked for, and it has to be selected explicitly.
  */
+/**
+ * @brief Out of process HiDPI selection, exit code as ground truth.
+ *
+ * In this server process, CGDisplayCopyDisplayMode and friends return null for
+ * freshly created virtual displays even though the active display list sees
+ * them, while every other process reads them fine. Cause unknown; measured
+ * repeatedly. So the selection re-executes this same binary with a flag: the
+ * child reads the modes, applies the HiDPI one, verifies, and its exit status
+ * is the verification.
+ *
+ * @return True when the child verified a HiDPI mode is presenting.
+ */
+- (BOOL)selectHiDPIModeOutOfProcess {
+  NSString *executable = [[NSBundle mainBundle] executablePath];
+  if (!executable) {
+    return NO;
+  }
+
+  NSString *displayArgument = [NSString stringWithFormat:@"%u", self.displayID];
+  const char *argv[] = {executable.fileSystemRepresentation, "--vd-select-hidpi", displayArgument.UTF8String, NULL};
+
+  pid_t child = 0;
+  if (posix_spawn(&child, argv[0], NULL, NULL, (char *const *) argv, NULL) != 0) {
+    NSLog(@"[sunshine] could not spawn the HiDPI selection helper");
+    return NO;
+  }
+
+  const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 5.0;
+  while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
+    int status = 0;
+    const pid_t reaped = waitpid(child, &status, WNOHANG);
+    if (reaped == child) {
+      return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    if (reaped < 0) {
+      return NO;
+    }
+    usleep(kAdoptionPollInterval);
+  }
+
+  kill(child, SIGKILL);
+  waitpid(child, NULL, 0);
+  NSLog(@"[sunshine] HiDPI selection helper timed out");
+  return NO;
+}
+
 - (BOOL)selectHiDPIMode {
   // The duplicate can appear a moment after the display is adopted, and the
   // configuration itself can be applied and then not take, so this verifies by
   // reading the mode back and retries rather than trusting return codes.
-  const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 2.0;
+  const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 0.5;
 
   while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
     NSDictionary *options = @{(__bridge NSString *) kCGDisplayShowDuplicateLowResolutionModes: @YES};
@@ -253,7 +314,11 @@ static const useconds_t kAdoptionPollInterval = 50000;
     usleep(kAdoptionPollInterval);
   }
 
-  return [self isHiDPIActive];
+  if ([self isHiDPIActive]) {
+    return YES;
+  }
+
+  return [self selectHiDPIModeOutOfProcess];
 }
 
 /**
@@ -278,6 +343,76 @@ static const useconds_t kAdoptionPollInterval = 50000;
 }
 
 @end
+
+int solari_vd_select_hidpi_main(uint32_t display_id) {
+  // Runs in a fresh process where the mode queries actually work.
+  const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 4.0;
+
+  while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
+    NSDictionary *options = @{(__bridge NSString *) kCGDisplayShowDuplicateLowResolutionModes: @YES};
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(display_id, (__bridge CFDictionaryRef) options);
+
+    CGDisplayModeRef best = NULL;
+    if (modes) {
+      for (CFIndex i = 0; i < CFArrayGetCount(modes); ++i) {
+        CGDisplayModeRef mode = (CGDisplayModeRef) CFArrayGetValueAtIndex(modes, i);
+        if (CGDisplayModeGetPixelWidth(mode) <= CGDisplayModeGetWidth(mode)) {
+          continue;
+        }
+        if (!best || CGDisplayModeGetPixelWidth(mode) > CGDisplayModeGetPixelWidth(best)) {
+          best = mode;
+        }
+      }
+    }
+
+    if (best) {
+      fprintf(stderr, "[vd-helper] applying %zux%zu (pixels %zux%zu)\n",
+              CGDisplayModeGetWidth(best), CGDisplayModeGetHeight(best),
+              CGDisplayModeGetPixelWidth(best), CGDisplayModeGetPixelHeight(best));
+
+      CGDisplayConfigRef configuration = NULL;
+      CGError err = CGBeginDisplayConfiguration(&configuration);
+      if (err == kCGErrorSuccess && configuration) {
+        err = CGConfigureDisplayWithDisplayMode(configuration, display_id, best, NULL);
+        fprintf(stderr, "[vd-helper] configure: %d\n", err);
+        if (err == kCGErrorSuccess) {
+          err = CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession);
+          fprintf(stderr, "[vd-helper] complete: %d\n", err);
+        } else {
+          CGCancelDisplayConfiguration(configuration);
+        }
+      } else {
+        fprintf(stderr, "[vd-helper] begin: %d\n", err);
+      }
+    } else {
+      fprintf(stderr, "[vd-helper] no HiDPI duplicate offered (modes: %ld)\n",
+              modes ? CFArrayGetCount(modes) : -1);
+    }
+
+    if (modes) {
+      CFRelease(modes);
+    }
+
+    // Let the change land before reading back.
+    usleep(300000);
+
+    CGDisplayModeRef current = CGDisplayCopyDisplayMode(display_id);
+    if (current) {
+      const bool active = CGDisplayModeGetPixelWidth(current) > CGDisplayModeGetWidth(current);
+      fprintf(stderr, "[vd-helper] readback: logical %zux%zu pixels %zux%zu\n",
+              CGDisplayModeGetWidth(current), CGDisplayModeGetHeight(current),
+              CGDisplayModeGetPixelWidth(current), CGDisplayModeGetPixelHeight(current));
+      CGDisplayModeRelease(current);
+      if (active) {
+        return 0;
+      }
+    }
+
+    usleep(100000);
+  }
+
+  return 1;
+}
 
 #pragma mark - Shared instance
 
@@ -308,9 +443,19 @@ CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double r
   // does not tear the desktop apart once per encoder.
   if (g_shared_display && g_shared_width == width && g_shared_height == height &&
       g_shared_refresh == refreshRate && g_shared_hidpi == hiDPI) {
-    const CGDirectDisplayID existing = g_shared_display.displayID;
+    SolariVirtualDisplay *existing = g_shared_display;
     [g_shared_lock unlock];
-    return existing;
+
+    // Selecting the HiDPI mode right after creation can fail while the window
+    // server is still adopting the display. Callers come back through here
+    // repeatedly, so keep trying until it verifies, then stop for good: the
+    // helper is a process spawn, and reapplying a display mode mid-stream is
+    // a visible glitch.
+    if (hiDPI && !existing.hiDPIVerified) {
+      existing.hiDPIVerified = [existing selectHiDPIMode];
+    }
+
+    return existing.displayID;
   }
 
   g_shared_display = nil;

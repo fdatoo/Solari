@@ -535,6 +535,8 @@ namespace platf {
 
         // Read the result back rather than reporting the request: whether the
         // mode is HiDPI is exactly the thing that has silently failed before.
+        // Unconditional: a diagnostic that can be skipped silently is no
+        // diagnostic. A null mode is itself worth knowing about.
         const auto mode {CGDisplayCopyDisplayMode(display_id)};
         if (mode) {
           const auto points_w {CGDisplayModeGetWidth(mode)};
@@ -548,9 +550,11 @@ namespace platf {
                           << " @ "sv << config.framerate << "Hz"sv;
 
           if (virtual_display_hidpi && pixels_w <= points_w) {
-            BOOST_LOG(error) << "HiDPI was requested but the virtual display is presenting a 1x mode. "sv
-                             << "Text will render small and thin."sv;
+            BOOST_LOG(warning) << "Virtual display is presenting 1x so far; HiDPI selection will be retried."sv;
           }
+        } else {
+          BOOST_LOG(info) << "Capturing virtual display ("sv << display_id
+                          << "), mode not yet readable from the window server."sv;
         }
       } else {
         BOOST_LOG(warning) << "Could not create a virtual display, capturing the physical one instead."sv;
