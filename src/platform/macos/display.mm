@@ -525,11 +525,21 @@ namespace platf {
         display->env_width = display->width;
         display->env_height = display->height;
 
+        const auto native {[display->sc_capture nativePixelSize]};
+
         if (hwdevice_type == platf::mem_type_e::videotoolbox) {
           [display->sc_capture setFrameWidth:config.width frameHeight:config.height];
         }
 
         BOOST_LOG(info) << "Using ScreenCaptureKit capture"sv;
+        BOOST_LOG(info) << "Display native resolution is "sv << (int) native.width << 'x' << (int) native.height
+                        << ", streaming at "sv << config.width << 'x' << config.height;
+
+        if (config.width > 0 && native.width > config.width * 1.5) {
+          BOOST_LOG(info) << "The client is asking for well under the display's native resolution. "sv
+                          << "Streaming at "sv << (int) native.width << 'x' << (int) native.height
+                          << " would avoid the downscale and look considerably sharper."sv;
+        }
         return display;
       }
 

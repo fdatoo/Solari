@@ -220,13 +220,35 @@ static const double kReferenceWhiteNits = 100.0;
   // Deeper than the default so a brief stall in the encoder drops frames inside
   // ScreenCaptureKit rather than backing up into the window server.
   configuration.queueDepth = 8;
-  configuration.scalesToFit = NO;
+
+  // Scale rather than crop when the requested aspect ratio differs from the
+  // display's, which it does whenever a client asks for a shape the panel is not.
+  configuration.scalesToFit = YES;
 
   if (@available(macOS 14.0, *)) {
+    // Composite from the full pixel resolution rather than the point resolution.
+    // On a Retina display the two differ by the backing scale, and compositing at
+    // point resolution renders text at 1x, which is what makes a downscaled
+    // stream look soft rather than merely smaller.
     configuration.captureResolution = SCCaptureResolutionBest;
   }
 
   return configuration;
+}
+
+- (CGSize)nativePixelSize {
+  if (@available(macOS 14.0, *)) {
+    SCContentFilter *filter = self.filter;
+    if (filter) {
+      const CGRect rect = filter.contentRect;
+      const float scale = filter.pointPixelScale;
+      if (rect.size.width > 0 && rect.size.height > 0 && scale > 0) {
+        return CGSizeMake(rect.size.width * scale, rect.size.height * scale);
+      }
+    }
+  }
+
+  return CGSizeMake(self.frameWidth, self.frameHeight);
 }
 
 - (void)setFrameWidth:(int)frameWidth frameHeight:(int)frameHeight {

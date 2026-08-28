@@ -129,6 +129,16 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)stopCapture;
 
 /**
+ * @brief The display's full pixel resolution behind the shared content.
+ *
+ * On a Retina display this is the point size multiplied by the backing scale, so
+ * it is larger than the logical size the desktop reports.
+ *
+ * @return Native size in pixels.
+ */
+- (CGSize)nativePixelSize;
+
+/**
  * @brief Why the last session ended.
  *
  * @return Stop reason.
