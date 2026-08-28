@@ -20,6 +20,7 @@
 #include "src/platform/macos/misc.h"
 #include "src/platform/macos/nv12_zero_device.h"
 #include "src/platform/macos/sc_video.h"
+#include "src/platform/macos/virtual_display.h"
 
 // Avoid conflict between AVFoundation and libavutil both defining AVMediaType
 /**
@@ -227,10 +228,15 @@ namespace platf {
     CGDirectDisplayID display_id {};  ///< Display ID.
     std::unique_ptr<display_device::DisplayPowerGuardInterface> display_power_guard;  ///< Display power guard.
     std::uint16_t peak_luminance {};  ///< Display peak luminance in nits.
+    SolariVirtualDisplay *virtual_display {};  ///< Virtual display being captured, if any.
 
     ~sc_display_t() override {
       [sc_capture stopCapture];
       [sc_capture release];
+
+      // Released after capture has stopped, since letting the display disappear
+      // from under a running stream is what makes the window server unhappy.
+      [virtual_display release];
     }
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
@@ -489,6 +495,30 @@ namespace platf {
 
     BOOST_LOG(info) << "Configuring selected display ("sv << display_id << ") to stream"sv;
 
+    // A display created at exactly the client's resolution removes scaling from
+    // the pipeline entirely, which is the only way to get a genuinely 1:1 image.
+    SolariVirtualDisplay *virtual_display {};
+    if (config::video.virtual_display == "enabled" && config.width > 0 && config.height > 0) {
+      if (![SolariVirtualDisplay isSupported]) {
+        BOOST_LOG(warning) << "Virtual displays are not available on this version of macOS."sv;
+      } else {
+        // Retained explicitly: this file is manual retain and release, and the
+        // factory method hands back an autoreleased object, which would take the
+        // display away at the next pool drain.
+        virtual_display = [[SolariVirtualDisplay displayWithWidth:config.width
+                                                           height:config.height
+                                                      refreshRate:config.framerate
+                                                            hiDPI:NO] retain];
+        if (virtual_display) {
+          display_id = virtual_display.displayID;
+          BOOST_LOG(info) << "Created a virtual display ("sv << display_id << ") at "sv
+                          << config.width << 'x' << config.height << " @ "sv << config.framerate << "Hz"sv;
+        } else {
+          BOOST_LOG(warning) << "Could not create a virtual display, capturing the physical one instead."sv;
+        }
+      }
+    }
+
     // ScreenCaptureKit only delivers a fixed set of pixel formats, and the 10-bit
     // biplanar format the VideoToolbox zero-copy path uses is not among them. When
     // the client asks for 10 bits, capture has to stay on AVFoundation until a
@@ -506,6 +536,7 @@ namespace platf {
     if ([SCVideo isSupported] && sck_format_supported) {
       auto display = std::make_shared<sc_display_t>();
       display->display_id = display_id;
+      display->virtual_display = virtual_display;
       display->display_power_guard = display_device::keep_display_awake("Sunshine display capture");
       if (display->display_power_guard) {
         BOOST_LOG(debug) << "Keeping display awake for capture"sv;
@@ -546,6 +577,14 @@ namespace platf {
       BOOST_LOG(warning) << "ScreenCaptureKit setup failed, falling back to AVFoundation."sv;
     } else if ([SCVideo isSupported]) {
       BOOST_LOG(info) << "ScreenCaptureKit cannot deliver the requested pixel format, using AVFoundation."sv;
+    }
+
+    if (virtual_display) {
+      // The fallback path has nowhere to keep it alive for the session.
+      BOOST_LOG(warning) << "Falling back to AVFoundation, releasing the virtual display."sv;
+      [virtual_display release];
+      virtual_display = nullptr;
+      display_id = CGMainDisplayID();
     }
 
     auto display = std::make_shared<av_display_t>();

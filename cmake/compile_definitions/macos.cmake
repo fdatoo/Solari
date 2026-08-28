@@ -59,10 +59,14 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/macos/publish.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/sc_video.h"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/sc_video.m"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/virtual_display.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/virtual_display.m"
         "${CMAKE_SOURCE_DIR}/third-party/TPCircularBuffer/TPCircularBuffer.c"
         "${CMAKE_SOURCE_DIR}/third-party/TPCircularBuffer/TPCircularBuffer.h"
         ${APPLE_PLIST_FILE})
 
 # ScreenCaptureKit is block-heavy, so this one file uses ARC.
 set_source_files_properties("${CMAKE_SOURCE_DIR}/src/platform/macos/sc_video.m"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/virtual_display.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/virtual_display.m"
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")

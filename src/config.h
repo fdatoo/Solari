@@ -51,6 +51,14 @@ namespace config {
      */
     int qp;  // higher == more compression and less quality
 
+    /**
+     * @brief Create an on-demand virtual display matching the client's resolution.
+     *
+     * macOS only. Streaming a display whose resolution differs from the client's
+     * means scaling somewhere, which is what makes a stream look soft.
+     */
+    std::string virtual_display;
+
     int hevc_mode;  ///< HEVC support mode advertised to clients.
     int av1_mode;  ///< AV1 support mode advertised to clients.
 
