@@ -336,16 +336,22 @@ static void print_summary(double duration_s) {
            motion_gaps_ms[(size_t) ((double) motion_gap_count * 0.95)],
            motion_gaps_ms[motion_gap_count - 1]);
 
-    /* A stall near 250 ms is the signature of cursor-association suppression. */
-    if (motion_gaps_ms[motion_gap_count - 1] >= 200.0) {
-      printf("NOTE: max gap >= 200 ms, consistent with cursor-association suppression.\n");
+    /* Locally generated events at a fixed rate arrive with a spread near 1 ms, so
+       anything far above that was introduced before the event was posted. Naming a
+       cause here would be guesswork: measure against pacing_generator instead. */
+    if (sqrt(variance) > 5.0) {
+      printf("NOTE: spread is well above the ~1 ms floor of locally posted events.\n");
+      printf("      Run pacing_generator for a baseline to tell injection apart\n");
+      printf("      from whatever produced the events.\n");
     }
 
     printf("\n-- mouse delta resolution --\n");
     printf("whole-pixel deltas  %lu / %lu\n", integral_deltas, motion_events);
     printf("zero deltas         %lu\n", zero_deltas);
     if (motion_events > 0 && integral_deltas == motion_events - zero_deltas) {
-      printf("NOTE: every delta is a whole pixel, so sub-pixel motion is being discarded.\n");
+      printf("NOTE: every delta is a whole pixel. Expected for relative motion, whose\n");
+      printf("      protocol packet carries 16-bit integers. Only meaningful for\n");
+      printf("      absolute positioning, which does carry sub-pixel precision.\n");
     }
   }
   printf("\n");
