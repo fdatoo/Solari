@@ -5,6 +5,10 @@
  * Compiled with ARC. The rest of the macOS platform code is manual retain and
  * release, but ScreenCaptureKit's API is built around blocks and completion
  * handlers, where manual memory management is a reliable source of mistakes.
+ *
+ * Every mutation of the stream and its configuration is guarded. The encoder
+ * thread resizes the output while the capture thread runs the session and the
+ * sample queue toggles the cursor, so three threads touch this state.
  */
 
 // platform includes
@@ -14,8 +18,8 @@
 // local includes
 #import "sc_video.h"
 
-/// How long to wait for the window server to enumerate shareable content.
-static const NSTimeInterval kShareableContentTimeout = 5.0;
+/// How long to wait for the window server to answer a request.
+static const NSTimeInterval kWindowServerTimeout = 5.0;
 
 /// Standard range reference white, used to turn EDR headroom into nits.
 static const double kReferenceWhiteNits = 100.0;
@@ -29,7 +33,8 @@ static const double kReferenceWhiteNits = 100.0;
 @property(nonatomic, strong, nullable) dispatch_semaphore_t stopSignal;
 @property(nonatomic, copy, nullable) SCFrameCallbackBlock frameCallback;
 @property(nonatomic, assign) BOOL capturing;
-@property(nonatomic, assign) BOOL hdrActive;
+@property(nonatomic, assign) BOOL showsCursor;
+@property(nonatomic, assign) SCVideoStopReason stopReasonValue;
 
 @end
 
@@ -40,6 +45,19 @@ static const double kReferenceWhiteNits = 100.0;
     return YES;
   }
   return NO;
+}
+
++ (BOOL)supportsPixelFormat:(OSType)pixelFormat {
+  switch (pixelFormat) {
+    case kCVPixelFormatType_32BGRA:  // 'BGRA'
+    case kCVPixelFormatType_ARGB2101010LEPacked:  // 'l10r'
+    case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:  // '420v'
+    case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:  // '420f'
+    case kCVPixelFormatType_64RGBAHalf:  // 'RGhA'
+      return YES;
+    default:
+      return NO;
+  }
 }
 
 /**
@@ -81,16 +99,15 @@ static const double kReferenceWhiteNits = 100.0;
     return 0;
   }
 
-  const double nits = headroom * kReferenceWhiteNits;
-  return (uint16_t) fmin(nits, 65535.0);
+  return (uint16_t) fmin(headroom * kReferenceWhiteNits, 65535.0);
 }
 
 /**
  * @brief Fetch the SCDisplay for a CoreGraphics display id.
  *
- * SCShareableContent is only available asynchronously, and callers here need a
- * display before they can build a stream, so this waits rather than restructuring
- * the whole capture path around a callback.
+ * SCShareableContent is only available asynchronously, and a stream cannot be
+ * built without it, so this waits rather than restructuring the capture path
+ * around a callback. Called only from setup, never from a callback.
  *
  * @param displayID Display to find.
  * @return Matching SCDisplay, or nil when it cannot be found in time.
@@ -108,7 +125,7 @@ static const double kReferenceWhiteNits = 100.0;
                                                 dispatch_semaphore_signal(ready);
                                               }];
 
-  const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kShareableContentTimeout * NSEC_PER_SEC));
+  const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kWindowServerTimeout * NSEC_PER_SEC));
   if (dispatch_semaphore_wait(ready, deadline) != 0) {
     NSLog(@"[sunshine] timed out enumerating shareable content");
     return nil;
@@ -129,21 +146,24 @@ static const double kReferenceWhiteNits = 100.0;
   return nil;
 }
 
-- (nullable instancetype)initWithDisplay:(CGDirectDisplayID)displayID frameRate:(int)frameRate hdr:(BOOL)hdr {
+- (nullable instancetype)initWithDisplay:(CGDirectDisplayID)displayID
+                               frameRate:(int)frameRate
+                             pixelFormat:(OSType)pixelFormat {
   self = [super init];
   if (!self) {
     return nil;
   }
 
-  if (![SCVideo isSupported]) {
+  if (![SCVideo isSupported] || ![SCVideo supportsPixelFormat:pixelFormat]) {
     return nil;
   }
 
   if (@available(macOS 12.3, *)) {
     _displayID = displayID;
     _frameRate = frameRate > 0 ? frameRate : 60;
-    _pixelFormat = kCVPixelFormatType_32BGRA;
-    _hdrRequested = hdr;
+    _pixelFormat = pixelFormat;
+    _showsCursor = YES;
+    _stopReasonValue = SCVideoStopReasonNone;
 
     SCDisplay *display = [SCVideo shareableDisplay:displayID];
     if (!display) {
@@ -162,12 +182,15 @@ static const double kReferenceWhiteNits = 100.0;
     }
 
     _filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
-    _configuration = [self buildConfiguration];
+    _configuration = [self buildConfigurationLocked];
     if (!_configuration) {
       return nil;
     }
 
-    _sampleQueue = dispatch_queue_create("dev.lizardbyte.sunshine.capture", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+    _sampleQueue = dispatch_queue_create(
+      "dev.lizardbyte.sunshine.capture",
+      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0)
+    );
 
     return self;
   }
@@ -176,34 +199,14 @@ static const double kReferenceWhiteNits = 100.0;
 }
 
 /**
- * @brief Build a stream configuration for the current settings.
+ * @brief Build a stream configuration from the current settings.
+ *
+ * Callers must hold the lock, or be in init before the object is shared.
  *
  * @return Configuration, or nil when one cannot be created.
  */
-- (nullable SCStreamConfiguration *)buildConfiguration API_AVAILABLE(macos(12.3)) {
-  SCStreamConfiguration *configuration = nil;
-  self.hdrActive = NO;
-
-  if (self.hdrRequested) {
-    if (@available(macOS 15.0, *)) {
-      // The preset carries the pixel format, colour space and matrix that belong
-      // together for HDR. Setting them piecemeal is how you get a stream that
-      // reports success and hands back mismatched buffers.
-      configuration = [SCStreamConfiguration streamConfigurationWithPreset:SCStreamConfigurationPresetCaptureHDRStreamCanonicalDisplay];
-      if (configuration) {
-        configuration.captureDynamicRange = SCCaptureDynamicRangeHDRCanonicalDisplay;
-        self.hdrActive = YES;
-      }
-    }
-
-    if (!self.hdrActive) {
-      NSLog(@"[sunshine] HDR capture unavailable, falling back to standard range");
-    }
-  }
-
-  if (!configuration) {
-    configuration = [[SCStreamConfiguration alloc] init];
-  }
+- (nullable SCStreamConfiguration *)buildConfigurationLocked API_AVAILABLE(macos(12.3)) {
+  SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
   if (!configuration) {
     return nil;
   }
@@ -211,18 +214,13 @@ static const double kReferenceWhiteNits = 100.0;
   configuration.width = (size_t) self.frameWidth;
   configuration.height = (size_t) self.frameHeight;
   configuration.minimumFrameInterval = CMTimeMake(1, self.frameRate);
-  configuration.showsCursor = YES;
+  configuration.pixelFormat = self.pixelFormat;
+  configuration.showsCursor = self.showsCursor;
 
   // Deeper than the default so a brief stall in the encoder drops frames inside
   // ScreenCaptureKit rather than backing up into the window server.
   configuration.queueDepth = 8;
   configuration.scalesToFit = NO;
-
-  // The preset already chose a format that matches the HDR colour space; only
-  // override it for standard range capture.
-  if (!self.hdrActive) {
-    configuration.pixelFormat = self.pixelFormat;
-  }
 
   if (@available(macOS 14.0, *)) {
     configuration.captureResolution = SCCaptureResolutionBest;
@@ -235,112 +233,133 @@ static const double kReferenceWhiteNits = 100.0;
   if (frameWidth <= 0 || frameHeight <= 0) {
     return;
   }
-  if (frameWidth == _frameWidth && frameHeight == _frameHeight) {
-    return;
-  }
 
-  _frameWidth = frameWidth;
-  _frameHeight = frameHeight;
-  [self applyConfiguration];
-}
-
-- (void)setPixelFormat:(OSType)pixelFormat {
-  if (pixelFormat == _pixelFormat) {
-    return;
-  }
-
-  _pixelFormat = pixelFormat;
-  [self applyConfiguration];
-}
-
-- (void)setShowsCursor:(BOOL)showsCursor {
-  if (@available(macOS 12.3, *)) {
-    if (!self.configuration || self.configuration.showsCursor == showsCursor) {
+  @synchronized(self) {
+    if (frameWidth == _frameWidth && frameHeight == _frameHeight) {
       return;
     }
 
-    self.configuration.showsCursor = showsCursor;
-    [self applyConfiguration];
+    _frameWidth = frameWidth;
+    _frameHeight = frameHeight;
+    [self applyConfigurationLocked];
+  }
+}
+
+- (void)setPixelFormat:(OSType)pixelFormat {
+  if (![SCVideo supportsPixelFormat:pixelFormat]) {
+    NSLog(@"[sunshine] ScreenCaptureKit cannot deliver the requested pixel format, keeping the current one");
+    return;
+  }
+
+  @synchronized(self) {
+    if (pixelFormat == _pixelFormat) {
+      return;
+    }
+
+    _pixelFormat = pixelFormat;
+    [self applyConfigurationLocked];
+  }
+}
+
+- (void)setShowsCursor:(BOOL)showsCursor {
+  @synchronized(self) {
+    if (_showsCursor == showsCursor) {
+      return;
+    }
+
+    _showsCursor = showsCursor;
+    [self applyConfigurationLocked];
   }
 }
 
 /**
- * @brief Push the current configuration to a running stream.
+ * @brief Push the current settings to a running stream.
  *
- * Rebuilds the configuration and updates in place. Updating avoids tearing the
- * stream down, which would drop frames and re-trigger the window server's
- * enumeration of shareable content.
+ * Callers must hold the lock. Updating in place avoids tearing the stream down,
+ * which would drop frames and re-run the window server's content enumeration.
  */
-- (void)applyConfiguration {
+- (void)applyConfigurationLocked {
   if (@available(macOS 12.3, *)) {
-    const BOOL showsCursor = self.configuration ? self.configuration.showsCursor : YES;
-
-    SCStreamConfiguration *configuration = [self buildConfiguration];
+    SCStreamConfiguration *configuration = [self buildConfigurationLocked];
     if (!configuration) {
       return;
     }
-    configuration.showsCursor = showsCursor;
+
     self.configuration = configuration;
 
-    if (!self.stream || !self.capturing) {
+    SCStream *stream = self.stream;
+    if (!stream || !self.capturing) {
       return;
     }
 
-    [self.stream updateConfiguration:configuration
-                   completionHandler:^(NSError *error) {
-                     if (error) {
-                       NSLog(@"[sunshine] could not update capture configuration: %@", error);
-                     }
-                   }];
+    [stream updateConfiguration:configuration
+              completionHandler:^(NSError *error) {
+                if (error) {
+                  NSLog(@"[sunshine] could not update capture configuration: %@", error);
+                }
+              }];
   }
 }
 
 - (nullable dispatch_semaphore_t)capture:(SCFrameCallbackBlock)frameCallback {
   if (@available(macOS 12.3, *)) {
-    if (!self.filter || !self.configuration) {
-      return nil;
+    SCStream *stream = nil;
+    dispatch_semaphore_t signal = nil;
+
+    @synchronized(self) {
+      if (self.capturing) {
+        // One session at a time. Tearing down a live session here would strand
+        // whoever is waiting on its semaphore.
+        NSLog(@"[sunshine] capture is already running on this source");
+        return nil;
+      }
+
+      if (!self.filter || !self.configuration) {
+        return nil;
+      }
+
+      self.stopReasonValue = SCVideoStopReasonNone;
+      self.frameCallback = frameCallback;
+      self.stopSignal = dispatch_semaphore_create(0);
+
+      stream = [[SCStream alloc] initWithFilter:self.filter configuration:self.configuration delegate:self];
+      if (!stream) {
+        NSLog(@"[sunshine] could not create a capture stream");
+        self.frameCallback = nil;
+        self.stopSignal = nil;
+        return nil;
+      }
+
+      NSError *error = nil;
+      if (![stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:self.sampleQueue error:&error]) {
+        NSLog(@"[sunshine] could not add a capture output: %@", error);
+        self.frameCallback = nil;
+        self.stopSignal = nil;
+        return nil;
+      }
+
+      self.stream = stream;
+      self.capturing = YES;
+      signal = self.stopSignal;
     }
-
-    [self stopCapture];
-
-    self.frameCallback = frameCallback;
-    self.stopSignal = dispatch_semaphore_create(0);
-    self.stream = [[SCStream alloc] initWithFilter:self.filter configuration:self.configuration delegate:self];
-    if (!self.stream) {
-      NSLog(@"[sunshine] could not create a capture stream");
-      return nil;
-    }
-
-    NSError *error = nil;
-    if (![self.stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:self.sampleQueue error:&error]) {
-      NSLog(@"[sunshine] could not add a capture output: %@", error);
-      self.stream = nil;
-      return nil;
-    }
-
-    self.capturing = YES;
 
     dispatch_semaphore_t started = dispatch_semaphore_create(0);
     __block NSError *startError = nil;
-    [self.stream startCaptureWithCompletionHandler:^(NSError *failure) {
+    [stream startCaptureWithCompletionHandler:^(NSError *failure) {
       startError = failure;
       dispatch_semaphore_signal(started);
     }];
 
-    const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kShareableContentTimeout * NSEC_PER_SEC));
-    if (dispatch_semaphore_wait(started, deadline) != 0) {
-      NSLog(@"[sunshine] timed out starting capture");
+    const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kWindowServerTimeout * NSEC_PER_SEC));
+    const BOOL timedOut = dispatch_semaphore_wait(started, deadline) != 0;
+
+    if (timedOut || startError) {
+      NSLog(@"[sunshine] could not start capture: %@", timedOut ? @"timed out" : startError);
       [self stopCapture];
       return nil;
     }
 
-    if (startError) {
-      NSLog(@"[sunshine] could not start capture: %@", startError);
-      [self stopCapture];
-      return nil;
-    }
-
-    return self.stopSignal;
+    return signal;
   }
 
   return nil;
@@ -348,43 +367,86 @@ static const double kReferenceWhiteNits = 100.0;
 
 - (void)stopCapture {
   if (@available(macOS 12.3, *)) {
-    SCStream *stream = self.stream;
-    if (!stream) {
+    SCStream *stream = nil;
+
+    @synchronized(self) {
+      stream = self.stream;
+      self.stream = nil;
       self.capturing = NO;
-      return;
+      self.frameCallback = nil;
     }
 
-    self.capturing = NO;
-    self.stream = nil;
+    if (stream) {
+      // Wait for the stream to finish so no callback can run against state this
+      // object is about to release.
+      dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
+      [stream stopCaptureWithCompletionHandler:^(NSError *error) {
+        if (error) {
+          NSLog(@"[sunshine] error while stopping capture: %@", error);
+        }
+        dispatch_semaphore_signal(stopped);
+      }];
 
-    [stream stopCaptureWithCompletionHandler:^(NSError *error) {
-      if (error) {
-        NSLog(@"[sunshine] error while stopping capture: %@", error);
+      const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kWindowServerTimeout * NSEC_PER_SEC));
+      if (dispatch_semaphore_wait(stopped, deadline) != 0) {
+        NSLog(@"[sunshine] timed out stopping capture");
       }
-    }];
+    }
 
     [self signalStopped];
   }
 }
 
+- (SCVideoStopReason)stopReason {
+  @synchronized(self) {
+    return self.stopReasonValue;
+  }
+}
+
 /**
- * @brief Release anything blocked waiting for capture to finish.
+ * @brief Release anything waiting for capture to finish.
  */
 - (void)signalStopped {
-  dispatch_semaphore_t signal = self.stopSignal;
+  dispatch_semaphore_t signal = nil;
+  @synchronized(self) {
+    signal = self.stopSignal;
+  }
+
   if (signal) {
     dispatch_semaphore_signal(signal);
+  }
+}
+
+/**
+ * @brief Record why capture ended, keeping the first reason recorded.
+ *
+ * @param reason Reason to record.
+ */
+- (void)recordStopReason:(SCVideoStopReason)reason {
+  @synchronized(self) {
+    if (self.stopReasonValue == SCVideoStopReasonNone) {
+      self.stopReasonValue = reason;
+    }
   }
 }
 
 #pragma mark - SCStreamOutput
 
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type API_AVAILABLE(macos(12.3)) {
-  if (type != SCStreamOutputTypeScreen || !self.capturing) {
+  if (type != SCStreamOutputTypeScreen) {
     return;
   }
 
-  SCFrameCallbackBlock callback = self.frameCallback;
+  SCFrameCallbackBlock callback = nil;
+  @synchronized(self) {
+    // A stopped stream can still have callbacks in flight, and its callback's
+    // captures are no longer valid, so identity is checked rather than assumed.
+    if (!self.capturing || stream != self.stream) {
+      return;
+    }
+    callback = self.frameCallback;
+  }
+
   if (!callback) {
     return;
   }
@@ -403,7 +465,10 @@ static const double kReferenceWhiteNits = 100.0;
       CFNumberGetValue(rawStatus, kCFNumberNSIntegerType, &status);
 
       if (status == SCFrameStatusStopped) {
-        self.capturing = NO;
+        [self recordStopReason:SCVideoStopReasonStream];
+        @synchronized(self) {
+          self.capturing = NO;
+        }
         [self signalStopped];
         return;
       }
@@ -415,7 +480,14 @@ static const double kReferenceWhiteNits = 100.0;
   }
 
   if (!callback(hasNewContent ? sampleBuffer : NULL)) {
-    self.capturing = NO;
+    [self recordStopReason:SCVideoStopReasonConsumer];
+
+    // Drop the callback before signalling. Its C++ captures live only as long as
+    // the capture call that installed it.
+    @synchronized(self) {
+      self.capturing = NO;
+      self.frameCallback = nil;
+    }
     [self signalStopped];
   }
 }
@@ -423,8 +495,15 @@ static const double kReferenceWhiteNits = 100.0;
 #pragma mark - SCStreamDelegate
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error API_AVAILABLE(macos(12.3)) {
-  NSLog(@"[sunshine] capture stopped: %@", error);
-  self.capturing = NO;
+  @synchronized(self) {
+    if (stream != self.stream) {
+      return;  // a stream we already replaced
+    }
+    self.capturing = NO;
+  }
+
+  NSLog(@"[sunshine] capture stopped unexpectedly: %@", error);
+  [self recordStopReason:SCVideoStopReasonStream];
   [self signalStopped];
 }
 

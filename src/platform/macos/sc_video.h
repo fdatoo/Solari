@@ -3,9 +3,14 @@
  * @brief Declarations for ScreenCaptureKit display capture.
  *
  * Replaces the AVCaptureScreenInput path, which Apple deprecated in macOS 13.
- * Beyond being current, ScreenCaptureKit is what gives us frame status, so an
- * unchanged display is reported as idle rather than silently delivering nothing,
- * and HDR capture, which AVFoundation screen input cannot express at all.
+ * Beyond being current, ScreenCaptureKit reports frame status, so a display with
+ * no new content is delivered as idle rather than as a duplicate frame, and it
+ * can change cursor visibility without restarting the stream.
+ *
+ * It does not cover every case. ScreenCaptureKit delivers only the pixel formats
+ * listed by SCVideoSupportsPixelFormat, which excludes the 10-bit biplanar format
+ * VideoToolbox's zero-copy path needs, so 10-bit capture still goes through
+ * AVFoundation. See supports_pixel_format below.
  */
 #pragma once
 
@@ -15,12 +20,13 @@
 #import <Foundation/Foundation.h>
 
 /**
- * @brief Result of handing a sample buffer to the consumer.
+ * @brief Why a capture session ended.
  */
-typedef enum {
-  SCVideoFrameHandledContinue,  ///< Consumer accepted the frame.
-  SCVideoFrameHandledStop  ///< Consumer asked to stop capturing.
-} SCVideoFrameDisposition;
+typedef NS_ENUM(NSInteger, SCVideoStopReason) {
+  SCVideoStopReasonNone,  ///< Still running.
+  SCVideoStopReasonConsumer,  ///< The consumer asked to stop.
+  SCVideoStopReasonStream  ///< The stream ended on its own, so capture should be rebuilt.
+};
 
 /**
  * @brief Called for each captured frame.
@@ -34,6 +40,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /**
  * @brief ScreenCaptureKit frame source for one display.
+ *
+ * One instance drives at most one capture session at a time.
  */
 @interface SCVideo: NSObject
 
@@ -42,8 +50,6 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) int frameWidth;  ///< Output width in pixels.
 @property(nonatomic, assign) int frameHeight;  ///< Output height in pixels.
 @property(nonatomic, assign) int frameRate;  ///< Requested frames per second.
-@property(nonatomic, assign) BOOL hdrRequested;  ///< Whether HDR capture was asked for.
-@property(nonatomic, readonly) BOOL hdrActive;  ///< Whether HDR capture is actually configured.
 
 /**
  * @brief Whether ScreenCaptureKit is usable on this system.
@@ -53,10 +59,19 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)isSupported;
 
 /**
- * @brief Whether a display can present extended dynamic range content.
+ * @brief Whether ScreenCaptureKit can deliver a pixel format.
  *
- * A display with no headroom renders everything in standard range, so capturing
- * it as HDR would produce HDR-tagged standard range content.
+ * The framework accepts only BGRA, l10r, 420v, 420f, xf44 and RGhA. Notably it
+ * cannot deliver kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, which is what
+ * the VideoToolbox zero-copy path uses for 10-bit.
+ *
+ * @param pixelFormat CoreVideo pixel format.
+ * @return True when a stream can be configured for it.
+ */
++ (BOOL)supportsPixelFormat:(OSType)pixelFormat;
+
+/**
+ * @brief Whether a display can present extended dynamic range content.
  *
  * @param displayID Display to inspect.
  * @return True when the display reports headroom above standard range.
@@ -76,10 +91,12 @@ NS_ASSUME_NONNULL_BEGIN
  *
  * @param displayID Display to capture.
  * @param frameRate Frames per second to request.
- * @param hdr Whether to request HDR capture.
+ * @param pixelFormat Desired pixel format; must satisfy supportsPixelFormat.
  * @return Initialised source, or nil when the display cannot be captured.
  */
-- (nullable instancetype)initWithDisplay:(CGDirectDisplayID)displayID frameRate:(int)frameRate hdr:(BOOL)hdr;
+- (nullable instancetype)initWithDisplay:(CGDirectDisplayID)displayID
+                               frameRate:(int)frameRate
+                             pixelFormat:(OSType)pixelFormat;
 
 /**
  * @brief Set the output frame size.
@@ -107,9 +124,16 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable dispatch_semaphore_t)capture:(SCFrameCallbackBlock)frameCallback;
 
 /**
- * @brief Stop capturing and release stream resources.
+ * @brief Stop capturing and wait for the stream to finish.
  */
 - (void)stopCapture;
+
+/**
+ * @brief Why the last session ended.
+ *
+ * @return Stop reason.
+ */
+- (SCVideoStopReason)stopReason;
 
 @end
 

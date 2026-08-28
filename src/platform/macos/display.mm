@@ -226,7 +226,6 @@ namespace platf {
     SCVideo *sc_capture {};  ///< ScreenCaptureKit capture source.
     CGDirectDisplayID display_id {};  ///< Display ID.
     std::unique_ptr<display_device::DisplayPowerGuardInterface> display_power_guard;  ///< Display power guard.
-    bool hdr_active {};  ///< Whether frames are being captured in HDR.
     std::uint16_t peak_luminance {};  ///< Display peak luminance in nits.
 
     ~sc_display_t() override {
@@ -294,6 +293,14 @@ namespace platf {
 
       dispatch_semaphore_wait(signal, DISPATCH_TIME_FOREVER);
 
+      // Only a consumer-initiated stop is a clean finish. If the stream ended on
+      // its own, from a resolution change or a display being unplugged, reporting
+      // success would tear the session down instead of rebuilding capture.
+      if ([sc_capture stopReason] == SCVideoStopReasonStream) {
+        BOOST_LOG(info) << "ScreenCaptureKit stream ended on its own, reinitializing capture."sv;
+        return capture_e::reinit;
+      }
+
       return capture_e::ok;
     }
 
@@ -320,54 +327,88 @@ namespace platf {
         return 1;
       }
 
-      __block bool captured = false;
+      // Synthesised rather than captured. This runs on the encoder probe path
+      // while the capture thread already owns the capture session, and a second
+      // session on the same source would stop the first. A blank frame of the
+      // right size and format is all the probe needs.
+      auto av_img = (av_img_t *) img;
 
-      auto signal = [sc_capture capture:^(CMSampleBufferRef sampleBuffer) {
-        if (!sampleBuffer) {
-          return true;  // idle frame, keep waiting for real content
-        }
-
-        auto new_sample_buffer = std::make_shared<av_sample_buf_t>(sampleBuffer);
-        auto new_pixel_buffer = std::make_shared<av_pixel_buf_t>(new_sample_buffer->buf);
-        auto av_img = (av_img_t *) img;
-
-        auto old_data_retainer = std::make_shared<temp_retain_av_img_t>(
-          av_img->sample_buffer,
-          av_img->pixel_buffer,
-          img->data
-        );
-
-        av_img->sample_buffer = new_sample_buffer;
-        av_img->pixel_buffer = new_pixel_buffer;
-        img->data = new_pixel_buffer->data();
-
-        img->width = (int) CVPixelBufferGetWidth(new_pixel_buffer->buf);
-        img->height = (int) CVPixelBufferGetHeight(new_pixel_buffer->buf);
-        img->row_pitch = (int) CVPixelBufferGetBytesPerRow(new_pixel_buffer->buf);
-        img->pixel_pitch = img->width > 0 ? img->row_pitch / img->width : 0;
-
-        old_data_retainer = nullptr;
-        captured = true;
-
-        return false;  // one frame is enough
-      }];
-
-      if (!signal) {
+      const auto width = frameWidthForDummy();
+      const auto height = frameHeightForDummy();
+      if (width <= 0 || height <= 0) {
         return 1;
       }
 
-      dispatch_semaphore_wait(signal, DISPATCH_TIME_FOREVER);
+      CVPixelBufferRef pixel_buffer {};
+      NSDictionary *attributes = @{
+        (__bridge NSString *) kCVPixelBufferIOSurfacePropertiesKey: @{},
+      };
 
-      return captured ? 0 : 1;
+      const auto status = CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        (size_t) width,
+        (size_t) height,
+        sc_capture.pixelFormat,
+        (__bridge CFDictionaryRef) attributes,
+        &pixel_buffer
+      );
+
+      if (status != kCVReturnSuccess || !pixel_buffer) {
+        BOOST_LOG(error) << "Could not allocate a dummy image buffer: "sv << status;
+        return 1;
+      }
+
+      CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+      for (size_t plane = 0; plane < std::max<size_t>(1, CVPixelBufferGetPlaneCount(pixel_buffer)); ++plane) {
+        auto *base = CVPixelBufferIsPlanar(pixel_buffer) ? CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, plane) : CVPixelBufferGetBaseAddress(pixel_buffer);
+        const auto bytes = CVPixelBufferIsPlanar(pixel_buffer) ? CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, plane) * CVPixelBufferGetHeightOfPlane(pixel_buffer, plane) : CVPixelBufferGetBytesPerRow(pixel_buffer) * CVPixelBufferGetHeight(pixel_buffer);
+        if (base && bytes > 0) {
+          std::memset(base, 0, bytes);
+        }
+      }
+      CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+
+      av_img->sample_buffer = nullptr;
+      av_img->pixel_buffer = std::make_shared<av_pixel_buf_t>(pixel_buffer);
+      CVPixelBufferRelease(pixel_buffer);  // the wrapper holds its own reference now
+
+      img->data = av_img->pixel_buffer->data();
+      img->width = width;
+      img->height = height;
+      img->row_pitch = (int) CVPixelBufferGetBytesPerRow(av_img->pixel_buffer->buf);
+      img->pixel_pitch = img->width > 0 ? img->row_pitch / img->width : 0;
+
+      return 0;
+    }
+
+    /**
+     * @brief Width to use for a synthesised frame.
+     *
+     * @return Width in pixels.
+     */
+    int frameWidthForDummy() const {
+      return sc_capture.frameWidth > 0 ? sc_capture.frameWidth : width;
+    }
+
+    /**
+     * @brief Height to use for a synthesised frame.
+     *
+     * @return Height in pixels.
+     */
+    int frameHeightForDummy() const {
+      return sc_capture.frameHeight > 0 ? sc_capture.frameHeight : height;
     }
 
     bool is_hdr() override {
-      return hdr_active;
+      // ScreenCaptureKit can capture HDR, but only into formats VideoToolbox's
+      // zero-copy path cannot take, so HDR is not offered until a conversion
+      // step exists. Claiming it here would tag standard range content as HDR.
+      return false;
     }
 
     bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
       std::memset(&metadata, 0, sizeof(metadata));
-      if (!hdr_active) {
+      if (!is_hdr()) {
         return false;
       }
 
@@ -448,30 +489,35 @@ namespace platf {
 
     BOOST_LOG(info) << "Configuring selected display ("sv << display_id << ") to stream"sv;
 
-    // HDR needs three things to line up: the client asked for it, the display can
-    // actually present extended range, and the capture backend supports it. A
-    // display with no headroom renders in standard range, so capturing it as HDR
-    // would only produce HDR-tagged standard range content.
-    const bool client_wants_hdr {config.dynamicRange > 0};
-    const bool display_supports_hdr {[SCVideo displaySupportsHDR:display_id] == YES};
-    const bool want_hdr {client_wants_hdr && display_supports_hdr};
+    // ScreenCaptureKit only delivers a fixed set of pixel formats, and the 10-bit
+    // biplanar format the VideoToolbox zero-copy path uses is not among them. When
+    // the client asks for 10 bits, capture has to stay on AVFoundation until a
+    // conversion step exists.
+    const auto wanted_pixel_format {videotoolbox_pixel_format(config, false)};
+    const bool sck_format_supported {[SCVideo supportsPixelFormat:wanted_pixel_format] == YES};
 
-    if (client_wants_hdr && !display_supports_hdr) {
-      BOOST_LOG(info) << "Client requested HDR but display ("sv << display_id
-                      << ") reports no extended dynamic range headroom, capturing in SDR."sv;
+    if (config.dynamicRange > 0) {
+      const bool display_supports_hdr {[SCVideo displaySupportsHDR:display_id] == YES};
+      BOOST_LOG(info) << "Client requested 10-bit output. Display ("sv << display_id << ") "sv
+                      << (display_supports_hdr ? "reports extended dynamic range headroom."sv
+                                               : "reports no extended dynamic range headroom, so its content is standard range."sv);
     }
 
-    if ([SCVideo isSupported]) {
+    if ([SCVideo isSupported] && sck_format_supported) {
       auto display = std::make_shared<sc_display_t>();
       display->display_id = display_id;
       display->display_power_guard = display_device::keep_display_awake("Sunshine display capture");
+      if (display->display_power_guard) {
+        BOOST_LOG(debug) << "Keeping display awake for capture"sv;
+      } else {
+        BOOST_LOG(debug) << "Unable to create display sleep prevention assertion"sv;
+      }
 
       display->sc_capture = [[SCVideo alloc] initWithDisplay:display_id
                                                   frameRate:config.framerate
-                                                        hdr:want_hdr ? YES : NO];
+                                                pixelFormat:wanted_pixel_format];
 
       if (display->sc_capture) {
-        display->hdr_active = display->sc_capture.hdrActive == YES;
         display->peak_luminance = [SCVideo displayPeakLuminance:display_id];
 
         display->width = display->sc_capture.frameWidth;
@@ -481,20 +527,25 @@ namespace platf {
 
         if (hwdevice_type == platf::mem_type_e::videotoolbox) {
           [display->sc_capture setFrameWidth:config.width frameHeight:config.height];
-          display->sc_capture.pixelFormat = videotoolbox_pixel_format(config, display->hdr_active);
         }
 
-        BOOST_LOG(info) << "Using ScreenCaptureKit capture ("sv
-                        << (display->hdr_active ? "HDR"sv : "SDR"sv) << ')';
+        BOOST_LOG(info) << "Using ScreenCaptureKit capture"sv;
         return display;
       }
 
       BOOST_LOG(warning) << "ScreenCaptureKit setup failed, falling back to AVFoundation."sv;
+    } else if ([SCVideo isSupported]) {
+      BOOST_LOG(info) << "ScreenCaptureKit cannot deliver the requested pixel format, using AVFoundation."sv;
     }
 
     auto display = std::make_shared<av_display_t>();
     display->display_id = display_id;
     display->display_power_guard = display_device::keep_display_awake("Sunshine display capture");
+    if (display->display_power_guard) {
+      BOOST_LOG(debug) << "Keeping display awake for capture"sv;
+    } else {
+      BOOST_LOG(debug) << "Unable to create display sleep prevention assertion"sv;
+    }
 
     display->av_capture = [[AVVideo alloc] initWithDisplay:display->display_id frameRate:config.framerate];
 
