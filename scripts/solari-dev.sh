@@ -22,17 +22,36 @@ is_running() {
 # revokes them. Signing with a real certificate instead ties the grants to the
 # certificate, which survives rebuilds. Set SOLARI_SIGN_ID to one of the identities
 # from `security find-identity -v -p codesigning` to get that.
+# Prints the signing identity: the certificate name, or "ad-hoc".
+signing_identity() {
+  local authority
+  authority=$(codesign -dvvv "$APP" 2>&1 | grep -m1 "^Authority=" | cut -d= -f2- || true)
+  if [[ -n "$authority" ]]; then
+    echo "$authority"
+  else
+    echo "ad-hoc"
+  fi
+}
+
 sign_app() {
   if [[ -n "${SOLARI_SIGN_ID:-}" ]]; then
-    if codesign --force --deep --sign "$SOLARI_SIGN_ID" "$APP" >/dev/null 2>&1; then
+    local err
+    if err=$(codesign --force --deep --sign "$SOLARI_SIGN_ID" "$APP" 2>&1); then
       return 0
     fi
-    echo "warning: signing with SOLARI_SIGN_ID failed, falling back to ad-hoc." >&2
-    echo "         run codesign yourself in Terminal if this persists." >&2
+
+    # Worth being loud about. Silently falling back to ad-hoc is what makes the
+    # permission panes disagree with the running app.
+    echo "warning: could not sign with SOLARI_SIGN_ID, falling back to ad-hoc." >&2
+    echo "         ${err##*: }" >&2
+    echo "         macOS ties permissions to the signature, so Screen Recording" >&2
+    echo "         and Accessibility will need re-granting after every rebuild." >&2
+    echo "         Fix by running this from your own Terminal:" >&2
+    echo "           $0 restart" >&2
   fi
 
   # Never downgrade an existing real signature to ad-hoc.
-  if codesign -dvvv "$APP" 2>&1 | grep -q "^Authority="; then
+  if [[ "$(signing_identity)" != "ad-hoc" ]]; then
     return 0
   fi
 
@@ -90,6 +109,14 @@ case "${1:-status}" in
       echo "running (pid $(pgrep -f 'Sunshine.app/Contents/MacOS/Sunshine' | head -1))"
     else
       echo "not running"
+    fi
+
+    echo
+    echo "signing:    $(signing_identity)"
+    if [[ "$(signing_identity)" == "ad-hoc" ]]; then
+      echo "            permissions are tied to this exact binary, so any rebuild"
+      echo "            revokes them. Run '$0 restart' from your Terminal to sign"
+      echo "            with SOLARI_SIGN_ID instead."
     fi
 
     echo
