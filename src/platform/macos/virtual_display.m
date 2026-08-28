@@ -154,12 +154,17 @@ static const useconds_t kAdoptionPollInterval = 50000;
     return nil;
   }
 
-  // The mode is registered at the point size. With hiDPI set, the window server
-  // backs those points with twice as many pixels in each axis, so a display asked
-  // for 1920x1080 points renders into 3840x2160 pixels.
+  // width and height are the PIXEL size the stream will capture. For HiDPI the
+  // mode is registered at half that, in points, while maxPixelsWide/High above
+  // stay at the full pixel size: the gap between the two is what gives the
+  // window server room to build the 2x backing store. Registering the mode at
+  // the same size as maxPixels leaves no room, and the display silently comes
+  // up 1x, which is exactly what happened before this comment existed.
   CGVirtualDisplaySettings *settings = [[settingsClass alloc] init];
+  const uint32_t mode_width = hiDPI ? (uint32_t) (width / 2) : (uint32_t) width;
+  const uint32_t mode_height = hiDPI ? (uint32_t) (height / 2) : (uint32_t) height;
   NSArray *modes = @[
-    [[modeClass alloc] initWithWidth:(uint32_t) width height:(uint32_t) height refreshRate:refreshRate]
+    [[modeClass alloc] initWithWidth:mode_width height:mode_height refreshRate:refreshRate]
   ];
 
   settings.modes = modes;
