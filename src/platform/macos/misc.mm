@@ -266,7 +266,9 @@ namespace platf {
   }
 
   void streaming_will_stop() {
-    // Nothing to do
+    // A client that disconnects mid-keypress never sends the release, which would
+    // otherwise leave a modifier asserted against the local user's desktop.
+    macos_input_reset_modifiers();
   }
 
   static pid_t g_restart_child_pid = 0;  ///< PID of the restarted child process for signal forwarding.

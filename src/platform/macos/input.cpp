@@ -9,9 +9,13 @@
  *   synthetic modifier press and release (src/input.cpp:989) and repeats that
  *   whole sequence about 25 times a second (src/input.cpp:1026). Because
  *   VKEY_SHIFT and VKEY_LSHIFT both resolve to kVK_Shift, a synthetic release
- *   used to clear the very bit a physically held Shift had set. Modifier bits
- *   are reference counted here, so the synthetic pair balances out while the
- *   player keeps the key down and the flag survives.
+ *   used to clear the very bit a physically held Shift had set. Held state is
+ *   tracked per portable key code here, so the synthetic modifier and the key
+ *   the player is actually holding no longer share one bit of state.
+ *
+ *   Note that state must not be a press count. The same repeat path re-sends a
+ *   bare press for a held key with no matching release, so a counter would climb
+ *   without ever returning to zero and the modifier would stick down for good.
  *
  *   Relative motion stutters. The shared backend warps the cursor after every
  *   move, which arms the WindowServer's local event suppression window and can
@@ -264,21 +268,47 @@ namespace platf {
     struct modifier_flags_t {
       CGEventFlags generic {};  ///< Device independent flag a game reads.
       CGEventFlags device {};  ///< Left or right device specific bit.
-      int slot {};  ///< Index into the press count table.
     };
 
-    // Slots for the eight device specific modifier bits that are counted.
-    enum : int {
-      slot_lshift = 0,
-      slot_rshift,
-      slot_lcontrol,
-      slot_rcontrol,
-      slot_lalt,
-      slot_ralt,
-      slot_lcommand,
-      slot_rcommand,
-      slot_count
+    /**
+     * @brief Portable key codes that carry modifier state.
+     *
+     * Held state is tracked per portable code rather than per macOS key, because
+     * several of these collapse onto one macOS key. The generic VKEY_SHIFT is what
+     * the common layer sends for a synthetic modifier (src/input.cpp:989), while a
+     * real keyboard sends VKEY_LSHIFT or VKEY_RSHIFT; both resolve to kVK_Shift.
+     * Keeping them apart is what stops a synthetic release from clearing a modifier
+     * the player is physically holding.
+     */
+    constexpr std::array<uint16_t, 11> modifier_portable_codes {
+      0x10,  // VKEY_SHIFT
+      0xA0,  // VKEY_LSHIFT
+      0xA1,  // VKEY_RSHIFT
+      0x11,  // VKEY_CONTROL
+      0xA2,  // VKEY_LCONTROL
+      0xA3,  // VKEY_RCONTROL
+      0x12,  // VKEY_MENU
+      0xA4,  // VKEY_LMENU
+      0xA5,  // VKEY_RMENU
+      0x5B,  // VKEY_LWIN
+      0x5C,  // VKEY_RWIN
     };
+
+    /**
+     * @brief Find the tracking slot for a portable key code.
+     *
+     * @param key_code Portable key code from the client.
+     * @return Slot index, or -1 when the key carries no modifier state.
+     */
+    int modifier_slot_for(uint16_t key_code) {
+      for (std::size_t i = 0; i < modifier_portable_codes.size(); ++i) {
+        if (modifier_portable_codes[i] == key_code) {
+          return static_cast<int>(i);
+        }
+      }
+
+      return -1;
+    }
 
     /**
      * @brief Resolve the modifier a macOS key code represents.
@@ -290,28 +320,28 @@ namespace platf {
     bool modifier_flags_for_key(CGKeyCode key, modifier_flags_t &flags) {
       switch (key) {
         case kVK_Shift:
-          flags = {kCGEventFlagMaskShift, NX_DEVICELSHIFTKEYMASK, slot_lshift};
+          flags = {kCGEventFlagMaskShift, NX_DEVICELSHIFTKEYMASK};
           return true;
         case kVK_RightShift:
-          flags = {kCGEventFlagMaskShift, NX_DEVICERSHIFTKEYMASK, slot_rshift};
+          flags = {kCGEventFlagMaskShift, NX_DEVICERSHIFTKEYMASK};
           return true;
         case kVK_Control:
-          flags = {kCGEventFlagMaskControl, NX_DEVICELCTLKEYMASK, slot_lcontrol};
+          flags = {kCGEventFlagMaskControl, NX_DEVICELCTLKEYMASK};
           return true;
         case kVK_RightControl:
-          flags = {kCGEventFlagMaskControl, NX_DEVICERCTLKEYMASK, slot_rcontrol};
+          flags = {kCGEventFlagMaskControl, NX_DEVICERCTLKEYMASK};
           return true;
         case kVK_Option:
-          flags = {kCGEventFlagMaskAlternate, NX_DEVICELALTKEYMASK, slot_lalt};
+          flags = {kCGEventFlagMaskAlternate, NX_DEVICELALTKEYMASK};
           return true;
         case kVK_RightOption:
-          flags = {kCGEventFlagMaskAlternate, NX_DEVICERALTKEYMASK, slot_ralt};
+          flags = {kCGEventFlagMaskAlternate, NX_DEVICERALTKEYMASK};
           return true;
         case kVK_Command:
-          flags = {kCGEventFlagMaskCommand, NX_DEVICELCMDKEYMASK, slot_lcommand};
+          flags = {kCGEventFlagMaskCommand, NX_DEVICELCMDKEYMASK};
           return true;
         case kVK_RightCommand:
-          flags = {kCGEventFlagMaskCommand, NX_DEVICERCMDKEYMASK, slot_rcommand};
+          flags = {kCGEventFlagMaskCommand, NX_DEVICERCMDKEYMASK};
           return true;
         default:
           return false;
@@ -400,9 +430,9 @@ namespace platf {
 
         CGEventSetIntegerValueField(event, kCGKeyboardEventKeycode, *key);
 
-        modifier_flags_t modifier;
-        if (modifier_flags_for_key(*key, modifier)) {
-          apply_modifier(modifier, release);
+        const auto slot = modifier_slot_for(key_code);
+        if (slot >= 0) {
+          apply_modifier(slot, release);
           CGEventSetType(event, kCGEventFlagsChanged);
         } else {
           CGEventSetType(event, release ? kCGEventKeyUp : kCGEventKeyDown);
@@ -497,6 +527,10 @@ namespace platf {
        */
       void move_absolute(const touch_port_t &touch_port, float x, float y) {
         std::lock_guard lock {mutex_};
+
+        // Without this the first absolute move reports a delta measured from the
+        // origin, which reads to a game's mouse-look as a full-screen flick.
+        sync_position_if_needed();
 
         const auto bounds = CGDisplayBounds(display_);
         if (touch_port.width <= 0 || touch_port.height <= 0) {
@@ -629,17 +663,16 @@ namespace platf {
        */
       void reset_modifiers() {
         std::lock_guard lock {mutex_};
-        if (keyboard_flags_ == 0 && std::ranges::all_of(modifier_counts_, [](int count) {
-              return count == 0;
-            })) {
+
+        const auto anything_held = std::ranges::any_of(modifier_held_, [](bool held) {
+          return held;
+        });
+        if (keyboard_flags_ == 0 && !anything_held) {
           return;
         }
 
-        modifier_counts_.fill(0);
-        keyboard_flags_ = 0;
-
         if (!keyboard_source_) {
-          return;
+          return;  // cannot announce the change, so keep state for a later attempt
         }
 
         const auto event = CGEventCreateKeyboardEvent(keyboard_source_, kVK_Shift, false);
@@ -647,10 +680,18 @@ namespace platf {
           return;
         }
 
+        // Clear only the bits this backend asserted. Caps lock and Fn belong to the
+        // local user's keyboard, so announcing them as released would be a lie.
+        const auto system_flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
+
         CGEventSetType(event, kCGEventFlagsChanged);
-        CGEventSetFlags(event, 0);
+        CGEventSetFlags(event, system_flags & ~keyboard_flags_);
         CGEventPost(kCGSessionEventTap, event);
         CFRelease(event);
+
+        // Only forget the state once the release has actually been announced.
+        modifier_held_.fill(false);
+        keyboard_flags_ = 0;
       }
 
     private:
@@ -683,42 +724,52 @@ namespace platf {
       macos_input_t &operator=(const macos_input_t &) = delete;
 
       /**
-       * @brief Apply a modifier press or release using reference counts.
+       * @brief Record a modifier key's held state and rebuild the flag word.
        *
-       * The common layer brackets keys with synthetic modifier presses and repeats
-       * that sequence while a key is held. Counting presses per device bit means a
-       * synthetic release cannot clear a modifier the player is still holding.
+       * State is a boolean per portable key code, never a press count. The common
+       * layer re-sends a bare press for a held key roughly 25 times a second
+       * (src/input.cpp:1026) and sends only one release, so anything that counts
+       * presses would never return to zero and the modifier would stick down.
+       * Setting a boolean is idempotent, so repeats are harmless.
        *
-       * @param modifier Modifier masks and count slot.
+       * Because the synthetic modifier arrives as VKEY_SHIFT while a real keyboard
+       * sends VKEY_LSHIFT, the two occupy different slots and the synthetic release
+       * cannot clear a modifier the player is still holding.
+       *
+       * @param slot Tracking slot for the portable key code.
        * @param release Whether this is a release.
        */
-      void apply_modifier(const modifier_flags_t &modifier, bool release) {
-        auto &count = modifier_counts_[modifier.slot];
-
-        if (!release) {
-          count++;
-          keyboard_flags_ |= modifier.generic | modifier.device;
-          return;
-        }
-
-        if (count > 0) {
-          count--;
-        }
-        if (count > 0) {
-          return;  // still held, keep the flag asserted
-        }
-
-        keyboard_flags_ &= ~modifier.device;
-
-        // Only drop the generic flag once no device of this modifier remains held.
-        const auto sibling = sibling_slot(modifier.slot);
-        if (modifier_counts_[sibling] == 0) {
-          keyboard_flags_ &= ~modifier.generic;
-        }
+      void apply_modifier(int slot, bool release) {
+        modifier_held_[slot] = !release;
+        rebuild_modifier_flags();
       }
 
-      static int sibling_slot(int slot) {
-        return slot % 2 == 0 ? slot + 1 : slot - 1;
+      /**
+       * @brief Recompute the flag word from the set of held modifier keys.
+       *
+       * Deriving the whole word each time means the flags cannot drift out of step
+       * with the held state, whatever order events arrive in.
+       */
+      void rebuild_modifier_flags() {
+        CGEventFlags flags = 0;
+
+        for (std::size_t i = 0; i < modifier_portable_codes.size(); ++i) {
+          if (!modifier_held_[i]) {
+            continue;
+          }
+
+          const auto key = macos_key_code(modifier_portable_codes[i]);
+          if (!key) {
+            continue;
+          }
+
+          modifier_flags_t modifier;
+          if (modifier_flags_for_key(*key, modifier)) {
+            flags |= modifier.generic | modifier.device;
+          }
+        }
+
+        keyboard_flags_ = flags;
       }
 
       /**
@@ -742,6 +793,13 @@ namespace platf {
 
       void clamp_position() {
         const auto bounds = CGDisplayBounds(display_);
+
+        // CGDisplayBounds yields an empty rect for a display that has gone away,
+        // which would put std::clamp's bounds the wrong way round.
+        if (bounds.size.width < 1.0 || bounds.size.height < 1.0) {
+          return;
+        }
+
         position_.x = std::clamp(position_.x, bounds.origin.x, bounds.origin.x + bounds.size.width - 1);
         position_.y = std::clamp(position_.y, bounds.origin.y, bounds.origin.y + bounds.size.height - 1);
       }
@@ -815,7 +873,7 @@ namespace platf {
       bool position_known_ = false;
       int scroll_lines_per_detent_ = default_scroll_lines_per_detent;
       CGEventFlags keyboard_flags_ {};
-      std::array<int, slot_count> modifier_counts_ {};
+      std::array<bool, modifier_portable_codes.size()> modifier_held_ {};
       std::array<bool, 3> button_down_ {};
       std::array<std::array<std::chrono::steady_clock::time_point, 2>, 3> last_button_event_ {};
     };

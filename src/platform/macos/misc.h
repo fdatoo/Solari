@@ -17,6 +17,14 @@ namespace platf {
    * @return True when Sunshine can capture the screen.
    */
   bool is_screen_capture_allowed();
+
+  /**
+   * @brief Release every modifier the input backend still believes is held.
+   *
+   * Defined in src/platform/macos/input.cpp. Called when a session ends so a key
+   * release lost with the client cannot leave a modifier stuck down locally.
+   */
+  void macos_input_reset_modifiers();
 }  // namespace platf
 
 namespace dyn {

@@ -144,48 +144,41 @@ namespace {
   };
 
   /**
-   * @brief Solari's reference counted accumulator.
+   * @brief Solari's held-state accumulator.
    *
    * Mirrors macos_input_t::apply_modifier() in src/platform/macos/input.cpp.
-   * Counting presses per device bit means the synthetic release that brackets a
-   * key cannot clear a modifier the player is still physically holding.
+   * State is a boolean per portable key code, so a repeated press is idempotent
+   * and the synthetic VKEY_SHIFT occupies a different slot from a physically held
+   * VKEY_LSHIFT. A press count would not work here: the common layer re-sends a
+   * bare press for a held key about 25 times a second and sends one release, so a
+   * counter would never return to zero and the modifier would stick down.
    */
-  class RefCountedAccumulator final: public ModifierAccumulator {
+  class HeldStateAccumulator final: public ModifierAccumulator {
   public:
     void submit(int portable_key_code, bool pressed) override {
-      const auto key = macos_key_code(portable_key_code);
-      if (key < 0) {
-        return;
+      switch (portable_key_code) {
+        case vk_shift:
+          synthetic_held_ = pressed;
+          break;
+        case vk_lshift:
+          left_held_ = pressed;
+          break;
+        default:
+          record_observation();
+          return;
       }
 
-      ModifierFlags modifier_flags;
-      if (modifier_flags_for_key(key, modifier_flags)) {
-        const bool is_left = modifier_flags.device == dev_lshift;
-        int &count = is_left ? left_count_ : right_count_;
-        const int &sibling = is_left ? right_count_ : left_count_;
-
-        if (pressed) {
-          count++;
-          keyboard_flags_ |= modifier_flags.generic | modifier_flags.device;
-        } else {
-          if (count > 0) {
-            count--;
-          }
-          if (count == 0) {
-            keyboard_flags_ &= ~modifier_flags.device;
-            if (sibling == 0) {
-              keyboard_flags_ &= ~modifier_flags.generic;
-            }
-          }
-        }
+      keyboard_flags_ = 0;
+      if (left_held_ || synthetic_held_) {
+        keyboard_flags_ |= flag_mask_shift | dev_lshift;
       }
 
       record_observation();
     }
 
   private:
-    int left_count_ = 0;
-    int right_count_ = 0;
+    bool left_held_ = false;
+    bool synthetic_held_ = false;
   };
 
   /// Mirrors send_key_and_modifiers(), src/input.cpp:989.
@@ -227,6 +220,12 @@ namespace {
     acc.submit(vk_lshift, true);
     std::printf("  player holds Left Shift            -> shift_down=%s\n", acc.shift_is_down() ? "true" : "false");
 
+    // repeat_key() re-sends a bare press for the held key itself, with no matching
+    // release (src/input.cpp:1033). Anything counting presses sticks down here.
+    for (int i = 0; i < 3; ++i) {
+      acc.submit(vk_lshift, true);
+    }
+
     send_key_and_modifiers(acc, vk_w, false, true);
     std::printf("  player presses W                   -> shift_down=%s\n", acc.shift_is_down() ? "true" : "false");
 
@@ -245,7 +244,14 @@ namespace {
       std::printf("   <-- oscillating at %.1f Hz",
                   elapsed_s > 0 ? static_cast<double>(presses - 1) / elapsed_s : 0.0);
     }
-    std::printf("\n\n");
+    std::printf("\n");
+
+    // The player finally lets go. Exactly one release is sent for the key.
+    acc.submit(vk_lshift, false);
+    const bool stuck = acc.shift_is_down();
+    std::printf("  player releases Left Shift         -> shift_down=%s%s\n\n",
+                stuck ? "true" : "false",
+                stuck ? "   <-- STUCK, poisons every later event" : "");
 
     return presses;
   }
@@ -261,7 +267,7 @@ int main() {
   ModifierAccumulator shared_backend;
   const auto shared_presses = run_scenario(shared_backend, "libvirtualhid shared backend (macos_backend.cpp:483-490)");
 
-  RefCountedAccumulator solari_backend;
+  HeldStateAccumulator solari_backend;
   const auto solari_presses = run_scenario(solari_backend, "Solari native backend (src/platform/macos/input.cpp)");
 
   std::printf("Verdict\n-------\n");
@@ -274,12 +280,14 @@ int main() {
     ok = false;
   }
 
-  if (solari_presses == 1 && solari_backend.shift_is_down()) {
-    std::printf("Solari backend holds the modifier down: 1 press, still held at the end\n");
-  } else {
-    std::printf("FAIL: Solari backend reported %u presses, held=%s\n",
-                solari_presses, solari_backend.shift_is_down() ? "true" : "false");
+  if (solari_presses != 1) {
+    std::printf("FAIL: Solari backend reported %u presses for one held key\n", solari_presses);
     ok = false;
+  } else if (solari_backend.shift_is_down()) {
+    std::printf("FAIL: Solari backend left Shift stuck down after the release\n");
+    ok = false;
+  } else {
+    std::printf("Solari backend: 1 press while held, and cleanly released at the end\n");
   }
 
   std::printf("\n%s\n", ok ? "PASS" : "FAIL");
