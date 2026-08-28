@@ -260,6 +260,10 @@ void solari_virtual_display_release(void) {
   g_shared_width = g_shared_height = 0;
   g_shared_refresh = 0;
   [g_shared_lock unlock];
+
+  // After the display is gone, so the restore does not try to place a display
+  // that no longer exists.
+  solari_virtual_display_restore_arrangement();
 }
 
 CGDirectDisplayID solari_virtual_display_current(void) {
@@ -267,4 +271,117 @@ CGDirectDisplayID solari_virtual_display_current(void) {
   const CGDirectDisplayID displayID = g_shared_display ? g_shared_display.displayID : 0;
   [g_shared_lock unlock];
   return displayID;
+}
+
+#pragma mark - Primary display
+
+/**
+ * Saved arrangement, so the desktop can be put back the way the user had it.
+ * CoreGraphics treats whichever display sits at the origin as the primary one, so
+ * making the virtual display primary means moving everything else out of the way.
+ */
+typedef struct {
+  CGDirectDisplayID displayID;
+  CGPoint origin;
+} solari_display_origin_t;
+
+static solari_display_origin_t g_saved_origins[32];
+static uint32_t g_saved_origin_count = 0;
+static BOOL g_arrangement_changed = NO;
+
+/**
+ * @brief Record where every active display currently sits.
+ */
+static void solari_save_arrangement(void) {
+  g_saved_origin_count = 0;
+
+  uint32_t count = 0;
+  CGDirectDisplayID ids[32];
+  if (CGGetActiveDisplayList(32, ids, &count) != kCGErrorSuccess) {
+    return;
+  }
+
+  for (uint32_t i = 0; i < count && i < 32; ++i) {
+    g_saved_origins[g_saved_origin_count].displayID = ids[i];
+    g_saved_origins[g_saved_origin_count].origin = CGDisplayBounds(ids[i]).origin;
+    g_saved_origin_count++;
+  }
+}
+
+BOOL solari_virtual_display_make_primary(void) {
+  [g_shared_lock lock];
+  SolariVirtualDisplay *display = g_shared_display;
+  [g_shared_lock unlock];
+
+  if (!display) {
+    return NO;
+  }
+
+  const CGDirectDisplayID target = display.displayID;
+  if (CGDisplayIsMain(target)) {
+    return YES;
+  }
+
+  solari_save_arrangement();
+  if (g_saved_origin_count == 0) {
+    return NO;
+  }
+
+  CGDisplayConfigRef configuration = NULL;
+  if (CGBeginDisplayConfiguration(&configuration) != kCGErrorSuccess || !configuration) {
+    return NO;
+  }
+
+  // Whatever sits at the origin is primary, so the virtual display goes there and
+  // the others are pushed to the right of it, keeping their relative order.
+  const CGRect target_bounds = CGDisplayBounds(target);
+  CGConfigureDisplayOrigin(configuration, target, 0, 0);
+
+  double next_x = target_bounds.size.width;
+  for (uint32_t i = 0; i < g_saved_origin_count; ++i) {
+    const CGDirectDisplayID other = g_saved_origins[i].displayID;
+    if (other == target) {
+      continue;
+    }
+
+    CGConfigureDisplayOrigin(configuration, other, (int32_t) next_x, 0);
+    next_x += CGDisplayBounds(other).size.width;
+  }
+
+  if (CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession) != kCGErrorSuccess) {
+    CGCancelDisplayConfiguration(configuration);
+    return NO;
+  }
+
+  g_arrangement_changed = YES;
+  return YES;
+}
+
+void solari_virtual_display_restore_arrangement(void) {
+  if (!g_arrangement_changed || g_saved_origin_count == 0) {
+    return;
+  }
+
+  g_arrangement_changed = NO;
+
+  CGDisplayConfigRef configuration = NULL;
+  if (CGBeginDisplayConfiguration(&configuration) != kCGErrorSuccess || !configuration) {
+    return;
+  }
+
+  for (uint32_t i = 0; i < g_saved_origin_count; ++i) {
+    // The virtual display is gone by now, so only real displays are restored.
+    if (CGDisplayIsActive(g_saved_origins[i].displayID)) {
+      CGConfigureDisplayOrigin(configuration,
+                               g_saved_origins[i].displayID,
+                               (int32_t) g_saved_origins[i].origin.x,
+                               (int32_t) g_saved_origins[i].origin.y);
+    }
+  }
+
+  if (CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession) != kCGErrorSuccess) {
+    CGCancelDisplayConfiguration(configuration);
+  }
+
+  g_saved_origin_count = 0;
 }
