@@ -5,6 +5,7 @@
 
 // standard includes
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
@@ -522,6 +523,23 @@ namespace platf {
       }
     }
 
+    if (virtual_display_wanted && config.width > 0 && config.height > 0 && vd_points_h > 0) {
+      // A desktop whose shape differs from the stream's gets scaled into it with
+      // bars painted inside the video, which the client then letterboxes again.
+      // Nothing downstream reports this, so it reads as a mysterious black frame.
+      const auto desktop_aspect {static_cast<double>(vd_points_w) / vd_points_h};
+      const auto stream_aspect {static_cast<double>(config.width) / config.height};
+      if (std::abs(desktop_aspect - stream_aspect) > 0.01) {
+        BOOST_LOG(warning) << "Virtual desktop ("sv << vd_points_w << 'x' << vd_points_h
+                           << ", "sv << desktop_aspect << ":1) and stream ("sv
+                           << config.width << 'x' << config.height << ", "sv << stream_aspect
+                           << ":1) have different aspect ratios, so the image will be letterboxed."sv;
+        BOOST_LOG(warning) << "For a full frame, set the client resolution to "sv
+                           << vd_points_w * 2 << 'x' << vd_points_h * 2
+                           << ", or set virtual_display_size to match the client's shape."sv;
+      }
+    }
+
     if (virtual_display_wanted && config.width > 0 && config.height > 0) {
       if (![SolariVirtualDisplay isSupported]) {
         BOOST_LOG(warning) << "Virtual displays are not available on this version of macOS."sv;
@@ -553,8 +571,10 @@ namespace platf {
             BOOST_LOG(warning) << "Virtual display is presenting 1x so far; HiDPI selection will be retried."sv;
           }
         } else {
-          BOOST_LOG(info) << "Capturing virtual display ("sv << display_id
-                          << "), mode not yet readable from the window server."sv;
+          // Expected: this process cannot read modes for a display it just made,
+          // which is why selection runs in a child. Not worth an info line per probe.
+          BOOST_LOG(debug) << "Capturing virtual display ("sv << display_id
+                           << "); mode unreadable from this process, as usual."sv;
         }
       } else {
         BOOST_LOG(warning) << "Could not create a virtual display, capturing the physical one instead."sv;

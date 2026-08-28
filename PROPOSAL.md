@@ -284,7 +284,7 @@ as Lumen did.
 
 ## 5. Phasing
 
-Status as of 2026-08-27: phases 0 and 1 are done, on branch
+Status as of 2026-08-28: phases 0 through 3 are done, on branch
 `solari/phase-0-bootstrap`. Upstream is forked to `fdatoo/Solari` at `377e07ce`
 and builds on macOS 26 (Xcode 21, tray and docs off for now, so Qt is not yet a
 dependency).
@@ -313,6 +313,61 @@ What the measurements settled, so it is not re-litigated later:
   overflow test is inverted, so batching terminates whenever the addition is
   safe. Harmless in practice, and it means batching was never collapsing
   motion. Worth reporting upstream.
+
+### Phase 2: capture
+
+ScreenCaptureKit replaced `AVCaptureScreenInput`, with AVFoundation kept as a
+fallback. Frame status means an idle display is reported as such rather than
+redelivering a stale frame, and cursor visibility changes without restarting
+the stream.
+
+HDR is not delivered, for two independent reasons, both measured rather than
+assumed. ScreenCaptureKit delivers only BGRA, l10r, 420v, 420f, xf44 and RGhA;
+the 10-bit biplanar format the VideoToolbox zero-copy path needs is absent, so
+HDR capture produces formats the encoder cannot take without a conversion step
+that would also cost the zero-copy property. Separately, the reference machine's
+displays report no extended dynamic range headroom, so there is no HDR content
+to capture and no way to verify the work. `is_hdr()` therefore returns false
+rather than tagging standard range content as HDR. Revisit when there is an HDR
+display to test against; `VTPixelTransferSession` is the likely route.
+
+### Phase 3: virtual display
+
+Delivered and verified end to end: a display created at the client's exact
+geometry, rendered HiDPI at 2x, made the main display, and torn down with the
+session. This is what finally produced a crisp image, and it is the same shape
+as what macOS Screen Sharing does.
+
+Two config options: `virtual_display` (disabled, enabled, hidpi) and
+`virtual_display_size` (WxH in points) which pins how large the desktop feels
+independently of how many pixels are streamed. Their aspect ratios must match
+the client's or the image is letterboxed inside the video; a warning now says
+so.
+
+The load-bearing discovery is that this server process cannot be trusted to
+configure displays. `CGDisplayCopyDisplayMode` and `CGDisplayCopyAllDisplayModes`
+return null for freshly created virtual displays here, while the active display
+list sees them and any other process reads them normally; root cause never
+found, reproduced consistently, and not reproducible from a bare thread in a
+clean process. Separately `CGDisplaySetDisplayMode` fails to apply globally for
+virtual displays while telling the calling process it worked. Both mode
+selection and the main-display switch therefore re-execute the Solari binary
+with a flag (`--vd-select-hidpi`, `--vd-make-primary`) and take the child's
+verified exit status as truth. The abandoned Lumen fork ran its virtual display
+from a helper executable, which looked like overengineering until this surfaced;
+it was very likely the same wall.
+
+### Known gaps
+
+- Fullscreen games can show the host cursor. Measured: macOS itself reports the
+  cursor visible during fullscreen play while the game hides it correctly when
+  windowed, and the state flickers second to second, so the game's hide is being
+  undone rather than capture compositing a hidden cursor. Not ours to fix from
+  outside. `Ctrl+Alt+Shift+N` toggles cursor compositing as a workaround.
+- A virtual display was once seen to outlive the process that created it and
+  block new ones. Seen once, cause unknown.
+- The `1470x956` desktop is downscaled into the stream unless the client
+  resolution is exactly twice it, which is the only pixel-exact configuration.
 
 Operational note for future sessions: the app must be signed with a real
 certificate (`SOLARI_SIGN_ID`), otherwise macOS ties Screen Recording and
