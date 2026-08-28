@@ -510,15 +510,6 @@ namespace platf {
         BOOST_LOG(info) << "Capturing virtual display ("sv << display_id << ") at "sv
                         << config.width << 'x' << config.height << " @ "sv << config.framerate << "Hz"sv
                         << (virtual_display_hidpi ? " (HiDPI)"sv : " (1x)"sv);
-
-        // The menu bar and newly opened windows follow the primary display, so
-        // without this the virtual display sits there empty while the game opens
-        // on a physical panel.
-        if (solari_virtual_display_make_primary()) {
-          BOOST_LOG(info) << "Virtual display is now the primary display."sv;
-        } else {
-          BOOST_LOG(warning) << "Could not make the virtual display primary; windows will open on the physical display."sv;
-        }
       } else {
         BOOST_LOG(warning) << "Could not create a virtual display, capturing the physical one instead."sv;
       }

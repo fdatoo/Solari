@@ -84,24 +84,6 @@ void solari_virtual_display_release(void);
  */
 CGDirectDisplayID solari_virtual_display_current(void);
 
-/**
- * @brief Make the shared virtual display the primary one.
- *
- * The menu bar, newly opened windows and launched games follow the primary
- * display, so without this the virtual display sits there empty while everything
- * opens on a physical panel. The previous arrangement is saved for restoration.
- *
- * Applied for the session only, so a reboot cannot leave the desktop rearranged.
- *
- * @return True when the arrangement was changed.
- */
-BOOL solari_virtual_display_make_primary(void);
-
-/**
- * @brief Put the display arrangement back the way it was.
- */
-void solari_virtual_display_restore_arrangement(void);
-
 #ifdef __cplusplus
 }
 #endif
