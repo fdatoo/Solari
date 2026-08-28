@@ -5,6 +5,7 @@
 
 // standard includes
 #include <charconv>
+#include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <optional>
@@ -502,14 +503,55 @@ namespace platf {
     // twice as large. Games render at pixel resolution either way.
     const bool virtual_display_hidpi {virtual_display_mode == "hidpi"};
 
+    // The desktop's logical size and the streamed pixel count are separate
+    // choices. By default the desktop looks like half the stream resolution, but
+    // that makes the UI enormous at modest stream sizes, so it can be pinned to
+    // a comfortable size while capture scales the 2x render into the stream.
+    int vd_points_w {config.width / 2};
+    int vd_points_h {config.height / 2};
+    if (virtual_display_hidpi && !config::video.virtual_display_size.empty()) {
+      int parsed_w {};
+      int parsed_h {};
+      if (std::sscanf(config::video.virtual_display_size.c_str(), "%dx%d", &parsed_w, &parsed_h) == 2 &&
+          parsed_w > 0 && parsed_h > 0) {
+        vd_points_w = parsed_w;
+        vd_points_h = parsed_h;
+      } else {
+        BOOST_LOG(warning) << "Could not parse virtual_display_size ["sv
+                           << config::video.virtual_display_size << "], expected WxH. Using the default."sv;
+      }
+    }
+
     if (virtual_display_wanted && config.width > 0 && config.height > 0) {
       if (![SolariVirtualDisplay isSupported]) {
         BOOST_LOG(warning) << "Virtual displays are not available on this version of macOS."sv;
-      } else if (const auto virtual_id {solari_virtual_display_acquire(config.width, config.height, config.framerate, virtual_display_hidpi ? YES : NO)}) {
+      } else if (const auto virtual_id {solari_virtual_display_acquire(
+                   virtual_display_hidpi ? vd_points_w * 2 : config.width,
+                   virtual_display_hidpi ? vd_points_h * 2 : config.height,
+                   config.framerate,
+                   virtual_display_hidpi ? YES : NO
+                 )}) {
         display_id = virtual_id;
-        BOOST_LOG(info) << "Capturing virtual display ("sv << display_id << ") at "sv
-                        << config.width << 'x' << config.height << " @ "sv << config.framerate << "Hz"sv
-                        << (virtual_display_hidpi ? " (HiDPI)"sv : " (1x)"sv);
+
+        // Read the result back rather than reporting the request: whether the
+        // mode is HiDPI is exactly the thing that has silently failed before.
+        const auto mode {CGDisplayCopyDisplayMode(display_id)};
+        if (mode) {
+          const auto points_w {CGDisplayModeGetWidth(mode)};
+          const auto pixels_w {CGDisplayModeGetPixelWidth(mode)};
+          const auto points_h {CGDisplayModeGetHeight(mode)};
+          const auto pixels_h {CGDisplayModeGetPixelHeight(mode)};
+          CGDisplayModeRelease(mode);
+
+          BOOST_LOG(info) << "Capturing virtual display ("sv << display_id << "): logical "sv
+                          << points_w << 'x' << points_h << ", pixels "sv << pixels_w << 'x' << pixels_h
+                          << " @ "sv << config.framerate << "Hz"sv;
+
+          if (virtual_display_hidpi && pixels_w <= points_w) {
+            BOOST_LOG(error) << "HiDPI was requested but the virtual display is presenting a 1x mode. "sv
+                             << "Text will render small and thin."sv;
+          }
+        }
       } else {
         BOOST_LOG(warning) << "Could not create a virtual display, capturing the physical one instead."sv;
       }

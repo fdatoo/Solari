@@ -186,8 +186,8 @@ static const useconds_t kAdoptionPollInterval = 50000;
   const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + kAdoptionTimeout;
   while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
     if ([SolariVirtualDisplay isDisplayActive:instance.displayID]) {
-      if (hiDPI) {
-        [instance selectHiDPIMode];
+      if (hiDPI && ![instance selectHiDPIMode]) {
+        NSLog(@"[sunshine] HiDPI mode selection did not take on the virtual display");
       }
       return instance;
     }
@@ -207,41 +207,69 @@ static const useconds_t kAdoptionPollInterval = 50000;
  * HiDPI mode is a scaled duplicate, so it only appears in the mode list when
  * duplicates are asked for, and it has to be selected explicitly.
  */
-- (void)selectHiDPIMode {
-  NSDictionary *options = @{(__bridge NSString *) kCGDisplayShowDuplicateLowResolutionModes: @YES};
-  CFArrayRef modes = CGDisplayCopyAllDisplayModes(self.displayID, (__bridge CFDictionaryRef) options);
-  if (!modes) {
-    return;
-  }
+- (BOOL)selectHiDPIMode {
+  // The duplicate can appear a moment after the display is adopted, and the
+  // configuration itself can be applied and then not take, so this verifies by
+  // reading the mode back and retries rather than trusting return codes.
+  const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 2.0;
 
-  CGDisplayModeRef best = NULL;
-  for (CFIndex i = 0; i < CFArrayGetCount(modes); ++i) {
-    CGDisplayModeRef mode = (CGDisplayModeRef) CFArrayGetValueAtIndex(modes, i);
+  while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
+    NSDictionary *options = @{(__bridge NSString *) kCGDisplayShowDuplicateLowResolutionModes: @YES};
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(self.displayID, (__bridge CFDictionaryRef) options);
 
-    // A HiDPI mode is one whose backing store is denser than its point size.
-    if (CGDisplayModeGetPixelWidth(mode) <= CGDisplayModeGetWidth(mode)) {
-      continue;
+    CGDisplayModeRef best = NULL;
+    if (modes) {
+      for (CFIndex i = 0; i < CFArrayGetCount(modes); ++i) {
+        CGDisplayModeRef mode = (CGDisplayModeRef) CFArrayGetValueAtIndex(modes, i);
+
+        // A HiDPI mode is one whose backing store is denser than its point size.
+        if (CGDisplayModeGetPixelWidth(mode) <= CGDisplayModeGetWidth(mode)) {
+          continue;
+        }
+        if (!best || CGDisplayModeGetPixelWidth(mode) > CGDisplayModeGetPixelWidth(best)) {
+          best = mode;
+        }
+      }
     }
-    if (!best || CGDisplayModeGetPixelWidth(mode) > CGDisplayModeGetPixelWidth(best)) {
-      best = mode;
+
+    if (best) {
+      CGDisplayConfigRef configuration = NULL;
+      if (CGBeginDisplayConfiguration(&configuration) == kCGErrorSuccess && configuration) {
+        CGConfigureDisplayWithDisplayMode(configuration, self.displayID, best, NULL);
+        if (CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession) != kCGErrorSuccess) {
+          CGCancelDisplayConfiguration(configuration);
+        }
+      }
     }
-  }
 
-  if (!best) {
-    NSLog(@"[sunshine] no HiDPI mode was offered for the virtual display");
-    CFRelease(modes);
-    return;
-  }
-
-  CGDisplayConfigRef configuration = NULL;
-  if (CGBeginDisplayConfiguration(&configuration) == kCGErrorSuccess && configuration) {
-    CGConfigureDisplayWithDisplayMode(configuration, self.displayID, best, NULL);
-    if (CGCompleteDisplayConfiguration(configuration, kCGConfigureForSession) != kCGErrorSuccess) {
-      CGCancelDisplayConfiguration(configuration);
+    if (modes) {
+      CFRelease(modes);
     }
+
+    if ([self isHiDPIActive]) {
+      return YES;
+    }
+
+    usleep(kAdoptionPollInterval);
   }
 
-  CFRelease(modes);
+  return [self isHiDPIActive];
+}
+
+/**
+ * @brief Whether the display is presenting a HiDPI mode right now.
+ *
+ * @return True when the active mode's backing store is denser than its points.
+ */
+- (BOOL)isHiDPIActive {
+  CGDisplayModeRef mode = CGDisplayCopyDisplayMode(self.displayID);
+  if (!mode) {
+    return NO;
+  }
+
+  const BOOL active = CGDisplayModeGetPixelWidth(mode) > CGDisplayModeGetWidth(mode);
+  CGDisplayModeRelease(mode);
+  return active;
 }
 
 - (void)dealloc {

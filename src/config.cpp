@@ -714,6 +714,7 @@ namespace config {
     28,  // qp
 
     "disabled"s,  // virtual_display
+    {},  // virtual_display_size
     0,  // hevc_mode
     0,  // av1_mode
 
@@ -1572,6 +1573,7 @@ namespace config {
 
     int_f(vars, "qp", video.qp);
     string_f(vars, "virtual_display", video.virtual_display);
+    string_f(vars, "virtual_display_size", video.virtual_display_size);
     int_between_f(vars, "hevc_mode", video.hevc_mode, {0, 3});
     int_between_f(vars, "av1_mode", video.av1_mode, {0, 3});
     int_f(vars, "min_threads", video.min_threads);
