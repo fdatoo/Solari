@@ -493,13 +493,23 @@ namespace platf {
 
     // A display created at exactly the client's resolution removes scaling from
     // the pipeline entirely, which is the only way to get a genuinely 1:1 image.
-    if (config::video.virtual_display == "enabled" && config.width > 0 && config.height > 0) {
+    const auto &virtual_display_mode {config::video.virtual_display};
+    const bool virtual_display_wanted {virtual_display_mode == "enabled" || virtual_display_mode == "hidpi"};
+
+    // A 1x display renders the desktop at one device pixel per point, so text is
+    // thin and reads as soft once it reaches the client. HiDPI renders at twice
+    // the detail into the same streamed pixels, at the cost of a UI that appears
+    // twice as large. Games render at pixel resolution either way.
+    const bool virtual_display_hidpi {virtual_display_mode == "hidpi"};
+
+    if (virtual_display_wanted && config.width > 0 && config.height > 0) {
       if (![SolariVirtualDisplay isSupported]) {
         BOOST_LOG(warning) << "Virtual displays are not available on this version of macOS."sv;
-      } else if (const auto virtual_id {solari_virtual_display_acquire(config.width, config.height, config.framerate)}) {
+      } else if (const auto virtual_id {solari_virtual_display_acquire(config.width, config.height, config.framerate, virtual_display_hidpi ? YES : NO)}) {
         display_id = virtual_id;
         BOOST_LOG(info) << "Capturing virtual display ("sv << display_id << ") at "sv
-                        << config.width << 'x' << config.height << " @ "sv << config.framerate << "Hz"sv;
+                        << config.width << 'x' << config.height << " @ "sv << config.framerate << "Hz"sv
+                        << (virtual_display_hidpi ? " (HiDPI)"sv : " (1x)"sv);
 
         // The menu bar and newly opened windows follow the primary display, so
         // without this the virtual display sits there empty while the game opens

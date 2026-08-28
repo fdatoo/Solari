@@ -210,13 +210,14 @@ static SolariVirtualDisplay *g_shared_display = nil;
 static int g_shared_width = 0;
 static int g_shared_height = 0;
 static double g_shared_refresh = 0;
+static BOOL g_shared_hidpi = NO;
 static NSLock *g_shared_lock = nil;
 
 __attribute__((constructor)) static void solari_virtual_display_init(void) {
   g_shared_lock = [[NSLock alloc] init];
 }
 
-CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate) {
+CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate, BOOL hiDPI) {
   if (width <= 0 || height <= 0) {
     return 0;
   }
@@ -225,7 +226,8 @@ CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double r
 
   // Reuse whatever is already there when the geometry matches, so a probe run
   // does not tear the desktop apart once per encoder.
-  if (g_shared_display && g_shared_width == width && g_shared_height == height && g_shared_refresh == refreshRate) {
+  if (g_shared_display && g_shared_width == width && g_shared_height == height &&
+      g_shared_refresh == refreshRate && g_shared_hidpi == hiDPI) {
     const CGDirectDisplayID existing = g_shared_display.displayID;
     [g_shared_lock unlock];
     return existing;
@@ -236,7 +238,7 @@ CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double r
   SolariVirtualDisplay *created = [SolariVirtualDisplay displayWithWidth:width
                                                                  height:height
                                                             refreshRate:refreshRate
-                                                                  hiDPI:NO];
+                                                                  hiDPI:hiDPI];
   if (!created) {
     g_shared_width = g_shared_height = 0;
     g_shared_refresh = 0;
@@ -248,6 +250,7 @@ CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double r
   g_shared_width = width;
   g_shared_height = height;
   g_shared_refresh = refreshRate;
+  g_shared_hidpi = hiDPI;
 
   const CGDirectDisplayID displayID = created.displayID;
   [g_shared_lock unlock];

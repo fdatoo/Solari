@@ -67,7 +67,7 @@ extern "C" {
  * @param refreshRate Refresh rate in Hz.
  * @return Display id, or 0 when no virtual display could be provided.
  */
-CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate);
+CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate, BOOL hiDPI);
 
 /**
  * @brief Release the shared virtual display.
