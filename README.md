@@ -1,3 +1,21 @@
+# Solari
+
+Solari is a modified version of [LizardByte/Sunshine](https://github.com/LizardByte/Sunshine),
+forked on 2026-08-27 to overhaul macOS support. It is not affiliated with or
+endorsed by the LizardByte project, and upstream cannot support it.
+
+What Solari changes on macOS: a native CoreGraphics input backend that fixes
+held modifiers oscillating and removes the per-move cursor warp, capture through
+ScreenCaptureKit rather than the deprecated AVCaptureScreenInput, and on-demand
+virtual displays created at the client's geometry and rendered HiDPI. See
+[PROPOSAL.md](PROPOSAL.md) for the full account, including what was measured and
+what is deliberately not implemented.
+
+Licensed under GPLv3, as upstream is. Original copyright and the NOTICE file are
+retained unchanged.
+
+---
+
 <div align="center">
   <img
     src="sunshine.svg"

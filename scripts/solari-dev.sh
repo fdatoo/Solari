@@ -7,14 +7,14 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP="$REPO/build/Sunshine.app"
-BIN="$APP/Contents/MacOS/Sunshine"
+APP="$REPO/build/Solari.app"
+BIN="$APP/Contents/MacOS/Solari"
 CONFIG="$HOME/.config/solari/solari.conf"
 LOG="$HOME/.config/solari/solari.log"
 PROBE="$REPO/build/solari_input_probe"
 
 is_running() {
-  pgrep -f "Sunshine.app/Contents/MacOS/Sunshine" >/dev/null 2>&1
+  pgrep -f "Solari.app/Contents/MacOS/Solari" >/dev/null 2>&1
 }
 
 # A rebuild changes the binary, and macOS ties Screen Recording and Accessibility
@@ -60,7 +60,7 @@ sign_app() {
 
 stop_server() {
   if is_running; then
-    pkill -f "Sunshine.app/Contents/MacOS/Sunshine" || true
+    pkill -f "Solari.app/Contents/MacOS/Solari" || true
     sleep 1
     echo "stopped"
   else
@@ -106,7 +106,7 @@ case "${1:-status}" in
     ;;
   status)
     if is_running; then
-      echo "running (pid $(pgrep -f 'Sunshine.app/Contents/MacOS/Sunshine' | head -1))"
+      echo "running (pid $(pgrep -f 'Solari.app/Contents/MacOS/Solari' | head -1))"
     else
       echo "not running"
     fi
@@ -156,11 +156,11 @@ case "${1:-status}" in
     # Clears the stale grants a rebuild leaves behind, so the panes stop showing an
     # app as approved when macOS no longer considers it the same app.
     stop_server
-    tccutil reset ScreenCapture dev.lizardbyte.app.Sunshine || true
-    tccutil reset Accessibility dev.lizardbyte.app.Sunshine || true
+    tccutil reset ScreenCapture dev.fdatoo.app.Solari || true
+    tccutil reset Accessibility dev.fdatoo.app.Solari || true
     start_server
     echo
-    echo "now re-enable Sunshine in both panes:"
+    echo "now re-enable Solari in both panes:"
     echo "  $0 permissions"
     ;;
   *)

@@ -127,12 +127,12 @@ static const double kReferenceWhiteNits = 100.0;
 
   const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kWindowServerTimeout * NSEC_PER_SEC));
   if (dispatch_semaphore_wait(ready, deadline) != 0) {
-    NSLog(@"[sunshine] timed out enumerating shareable content");
+    NSLog(@"[solari] timed out enumerating shareable content");
     return nil;
   }
 
   if (!content) {
-    NSLog(@"[sunshine] could not enumerate shareable content: %@", failure);
+    NSLog(@"[solari] could not enumerate shareable content: %@", failure);
     return nil;
   }
 
@@ -142,7 +142,7 @@ static const double kReferenceWhiteNits = 100.0;
     }
   }
 
-  NSLog(@"[sunshine] display %u is not in the shareable content list", displayID);
+  NSLog(@"[solari] display %u is not in the shareable content list", displayID);
   return nil;
 }
 
@@ -188,7 +188,7 @@ static const double kReferenceWhiteNits = 100.0;
     }
 
     _sampleQueue = dispatch_queue_create(
-      "dev.lizardbyte.sunshine.capture",
+      "dev.fdatoo.solari.capture",
       dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0)
     );
 
@@ -269,7 +269,7 @@ static const double kReferenceWhiteNits = 100.0;
 
 - (void)setPixelFormat:(OSType)pixelFormat {
   if (![SCVideo supportsPixelFormat:pixelFormat]) {
-    NSLog(@"[sunshine] ScreenCaptureKit cannot deliver the requested pixel format, keeping the current one");
+    NSLog(@"[solari] ScreenCaptureKit cannot deliver the requested pixel format, keeping the current one");
     return;
   }
 
@@ -317,7 +317,7 @@ static const double kReferenceWhiteNits = 100.0;
     [stream updateConfiguration:configuration
               completionHandler:^(NSError *error) {
                 if (error) {
-                  NSLog(@"[sunshine] could not update capture configuration: %@", error);
+                  NSLog(@"[solari] could not update capture configuration: %@", error);
                 }
               }];
   }
@@ -332,7 +332,7 @@ static const double kReferenceWhiteNits = 100.0;
       if (self.capturing) {
         // One session at a time. Tearing down a live session here would strand
         // whoever is waiting on its semaphore.
-        NSLog(@"[sunshine] capture is already running on this source");
+        NSLog(@"[solari] capture is already running on this source");
         return nil;
       }
 
@@ -346,7 +346,7 @@ static const double kReferenceWhiteNits = 100.0;
 
       stream = [[SCStream alloc] initWithFilter:self.filter configuration:self.configuration delegate:self];
       if (!stream) {
-        NSLog(@"[sunshine] could not create a capture stream");
+        NSLog(@"[solari] could not create a capture stream");
         self.frameCallback = nil;
         self.stopSignal = nil;
         return nil;
@@ -354,7 +354,7 @@ static const double kReferenceWhiteNits = 100.0;
 
       NSError *error = nil;
       if (![stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:self.sampleQueue error:&error]) {
-        NSLog(@"[sunshine] could not add a capture output: %@", error);
+        NSLog(@"[solari] could not add a capture output: %@", error);
         self.frameCallback = nil;
         self.stopSignal = nil;
         return nil;
@@ -376,7 +376,7 @@ static const double kReferenceWhiteNits = 100.0;
     const BOOL timedOut = dispatch_semaphore_wait(started, deadline) != 0;
 
     if (timedOut || startError) {
-      NSLog(@"[sunshine] could not start capture: %@", timedOut ? @"timed out" : startError);
+      NSLog(@"[solari] could not start capture: %@", timedOut ? @"timed out" : startError);
       [self stopCapture];
       return nil;
     }
@@ -404,14 +404,14 @@ static const double kReferenceWhiteNits = 100.0;
       dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
       [stream stopCaptureWithCompletionHandler:^(NSError *error) {
         if (error) {
-          NSLog(@"[sunshine] error while stopping capture: %@", error);
+          NSLog(@"[solari] error while stopping capture: %@", error);
         }
         dispatch_semaphore_signal(stopped);
       }];
 
       const dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kWindowServerTimeout * NSEC_PER_SEC));
       if (dispatch_semaphore_wait(stopped, deadline) != 0) {
-        NSLog(@"[sunshine] timed out stopping capture");
+        NSLog(@"[solari] timed out stopping capture");
       }
     }
 
@@ -524,7 +524,7 @@ static const double kReferenceWhiteNits = 100.0;
     self.capturing = NO;
   }
 
-  NSLog(@"[sunshine] capture stopped unexpectedly: %@", error);
+  NSLog(@"[solari] capture stopped unexpectedly: %@", error);
   [self recordStopReason:SCVideoStopReasonStream];
   [self signalStopped];
 }

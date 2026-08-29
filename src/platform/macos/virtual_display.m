@@ -165,7 +165,7 @@ static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChan
 
   // A serial queue of our own, not the main queue. This process has no main run
   // loop to service, and the display only needs somewhere to deliver callbacks.
-  instance.queue = dispatch_queue_create("dev.lizardbyte.sunshine.virtualdisplay", DISPATCH_QUEUE_SERIAL);
+  instance.queue = dispatch_queue_create("dev.fdatoo.solari.virtualdisplay", DISPATCH_QUEUE_SERIAL);
 
   CGVirtualDisplayDescriptor *descriptor = [[descriptorClass alloc] init];
   descriptor.queue = instance.queue;
@@ -187,12 +187,12 @@ static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChan
   descriptor.bluePrimary = CGPointMake(0.150, 0.060);
   descriptor.whitePoint = CGPointMake(0.3127, 0.3290);
   descriptor.terminationHandler = ^(id sender, id reason) {
-    NSLog(@"[sunshine] virtual display terminated by the window server");
+    NSLog(@"[solari] virtual display terminated by the window server");
   };
 
   id display = [[displayClass alloc] initWithDescriptor:descriptor];
   if (!display) {
-    NSLog(@"[sunshine] could not create a virtual display");
+    NSLog(@"[solari] could not create a virtual display");
     return nil;
   }
 
@@ -213,7 +213,7 @@ static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChan
   settings.hiDPI = hiDPI ? 1 : 0;
 
   if (![display applySettings:settings]) {
-    NSLog(@"[sunshine] could not apply virtual display settings");
+    NSLog(@"[solari] could not apply virtual display settings");
     return nil;
   }
 
@@ -231,7 +231,7 @@ static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChan
       if (hiDPI) {
         instance.hiDPIVerified = [instance selectHiDPIMode];
         if (!instance.hiDPIVerified) {
-          NSLog(@"[sunshine] HiDPI mode selection did not take on the virtual display");
+          NSLog(@"[solari] HiDPI mode selection did not take on the virtual display");
         }
       }
 
@@ -241,7 +241,7 @@ static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChan
     usleep(kAdoptionPollInterval);
   }
 
-  NSLog(@"[sunshine] virtual display %u was created but never became active", instance.displayID);
+  NSLog(@"[solari] virtual display %u was created but never became active", instance.displayID);
   return nil;
 }
 
@@ -312,7 +312,7 @@ static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChan
 
   if (spawned != 0) {
     close(verdict[0]);
-    NSLog(@"[sunshine] could not spawn the display helper %s", flag);
+    NSLog(@"[solari] could not spawn the display helper %s", flag);
     return NO;
   }
 
@@ -396,7 +396,7 @@ static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChan
   }
 
   g_saved_arrangement = [arrangement copy];
-  NSLog(@"[sunshine] saved display arrangement: %@", g_saved_arrangement);
+  NSLog(@"[solari] saved display arrangement: %@", g_saved_arrangement);
 }
 
 /**
