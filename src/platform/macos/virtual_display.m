@@ -15,6 +15,7 @@
 #import <signal.h>
 #import <spawn.h>
 #import <errno.h>
+#import <stdatomic.h>
 #import <poll.h>
 #import <sys/wait.h>
 #import <unistd.h>
@@ -79,6 +80,9 @@ static const char kHelperSuccessByte = 'K';
 
 /// Display origins as they were before the virtual display took the origin.
 static NSString *g_saved_arrangement = nil;
+
+/// Set by the reconfiguration callback; consumed by acquire on the next call.
+static atomic_bool g_arrangement_dirty = false;
 
 /// Forward declaration: the reconfiguration callback needs the shared instance.
 static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *context);
@@ -743,11 +747,6 @@ static NSLock *g_shared_lock = nil;
 __attribute__((constructor)) static void solari_virtual_display_init(void) {
   g_shared_lock = [[NSLock alloc] init];
 
-  // Someone at the Mac can drag the arrangement in System Settings, or plug in a
-  // monitor, and the window server will renormalise origins. That silently
-  // demotes the virtual display, and without this the cached verification would
-  // keep claiming it is still main for the rest of the session.
-  CGDisplayRegisterReconfigurationCallback(solari_display_reconfigured, NULL);
 
   // streaming_will_stop only fires once a session has ended, but the encoder
   // probe creates a display before any session exists, and that one has nothing
@@ -775,24 +774,36 @@ static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChan
     return;
   }
 
-  [g_shared_lock lock];
-  SolariVirtualDisplay *shared = g_shared_display;
-  [g_shared_lock unlock];
-
-  if (!shared) {
-    return;
-  }
-
-  // Re-verified on the next acquire, which the capture path reaches on reinit.
-  if (!CGDisplayIsMain(shared.displayID)) {
-    shared.primaryVerified = NO;
-  }
+  // Set a flag and return. Nothing else.
+  //
+  // The window server runs this on the main thread while it holds the display
+  // configuration, and it fires precisely when a display is being created, which
+  // is when acquire() below holds g_shared_lock across a display creation and two
+  // helper process spawns. Taking that lock here parked the main thread for as
+  // long as that took, which shows up as the process not responding and stalls
+  // the window server hard enough to beachball the whole machine on any input.
+  // Reading CGDisplayIsMain here is no better: it re-enters CoreGraphics during
+  // a reconfiguration it is itself reporting.
+  atomic_store_explicit(&g_arrangement_dirty, true, memory_order_relaxed);
 }
 
 CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate, BOOL hiDPI) {
   if (width <= 0 || height <= 0) {
     return 0;
   }
+
+  // Registered here rather than from a constructor. This binary re-executes
+  // itself as a helper, so a constructor would install this in every helper too,
+  // where it is useless and fires during the very reconfiguration the helper is
+  // performing. Only the server calls acquire.
+  static dispatch_once_t register_once;
+  dispatch_once(&register_once, ^{
+    // Someone at the Mac can drag the arrangement in System Settings, or plug in
+    // a monitor, and the window server renormalises origins, silently demoting
+    // the virtual display. Without this, the cached verification would keep
+    // claiming it is still main for the rest of the session.
+    CGDisplayRegisterReconfigurationCallback(solari_display_reconfigured, NULL);
+  });
 
   [g_shared_lock lock];
 
@@ -808,6 +819,15 @@ CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double r
     // repeatedly, so keep trying until it verifies, then stop for good: the
     // helper is a process spawn, and reapplying a display mode mid-stream is
     // a visible glitch.
+    // Displays moved since the last call, so whatever was verified may no longer
+    // hold. Checked here rather than in the callback, because this thread is
+    // allowed to block and the callback's thread is emphatically not.
+    if (atomic_exchange_explicit(&g_arrangement_dirty, false, memory_order_relaxed)) {
+      if (!CGDisplayIsMain(existing.displayID)) {
+        existing.primaryVerified = NO;
+      }
+    }
+
     if (hiDPI && !existing.hiDPIVerified) {
       existing.hiDPIVerified = [existing selectHiDPIMode];
     }
