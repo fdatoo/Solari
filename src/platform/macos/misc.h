@@ -17,6 +17,40 @@ namespace platf {
    * @return True when Sunshine can capture the screen.
    */
   bool is_screen_capture_allowed();
+
+  /**
+   * @brief Check whether this process may inject keyboard and mouse events.
+   *
+   * @return True when Accessibility permission is granted.
+   */
+  bool is_accessibility_allowed();
+
+  /**
+   * @brief Report Accessibility permission and prompt for it when it is missing.
+   *
+   * Injected input fails silently without this permission, so it is checked at
+   * startup rather than left to be discovered mid-session.
+   */
+  void check_accessibility_permission();
+
+  /**
+   * @brief Release every modifier the input backend still believes is held.
+   *
+   * Defined in src/platform/macos/input.cpp. Called when a session ends so a key
+   * release lost with the client cannot leave a modifier stuck down locally.
+   */
+  void macos_input_reset_modifiers();
+
+  /**
+   * @brief Bound injected input to a particular display.
+   *
+   * Cursor motion is clamped to this display and absolute coordinates are mapped
+   * onto it, so it must be the display actually being captured. Without this the
+   * cursor cannot reach a virtual display at all.
+   *
+   * @param display CoreGraphics display identifier.
+   */
+  void macos_input_set_display(CGDirectDisplayID display);
 }  // namespace platf
 
 namespace dyn {

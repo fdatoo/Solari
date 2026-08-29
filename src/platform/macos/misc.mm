@@ -17,6 +17,7 @@
 #include <ifaddrs.h>
 
 // platform includes
+#include <ApplicationServices/ApplicationServices.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <Foundation/Foundation.h>
@@ -32,6 +33,7 @@
 
 // local includes
 #include "misc.h"
+#include "src/platform/macos/virtual_display.h"
 #include "src/entry_handler.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -74,6 +76,12 @@ namespace platf {
   }
 
   std::unique_ptr<deinit_t> init() {
+    // Asked for first, and unconditionally. A process appears in the Accessibility
+    // list only once it has requested access, so deferring this until after the
+    // screen capture gate would hide it from that list on exactly the run where
+    // the user is trying to grant both.
+    check_accessibility_permission();
+
     // This will generate a warning about CGPreflightScreenCaptureAccess and
     // CGRequestScreenCaptureAccess being unavailable before macOS 10.15, but
     // we have a guard to prevent it from being called on those earlier systems.
@@ -99,7 +107,29 @@ namespace platf {
 #pragma clang diagnostic pop
     // Record that we determined that we have the screen capture permission.
     screen_capture_allowed = true;
+
     return std::make_unique<deinit_t>();
+  }
+
+  bool is_accessibility_allowed() {
+    return AXIsProcessTrusted();
+  }
+
+  void check_accessibility_permission() {
+    if (AXIsProcessTrusted()) {
+      BOOST_LOG(info) << "Accessibility permission granted, keyboard and mouse input will work"sv;
+      return;
+    }
+
+    // Injected input needs Accessibility, but CGEventPost fails silently without
+    // it: the stream looks healthy while nothing the client sends has any effect.
+    // Prompting here turns that into something the user can see and act on.
+    BOOST_LOG(error) << "No accessibility permission!"sv;
+    BOOST_LOG(error) << "Keyboard and mouse input will be silently ignored until it is granted."sv;
+    BOOST_LOG(error) << "Grant it in 'System Settings' -> 'Privacy & Security' -> 'Accessibility'"sv;
+
+    NSDictionary *options = @{(__bridge NSString *) kAXTrustedCheckOptionPrompt: @YES};
+    AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef) options);
   }
 
   fs::path appdata() {
@@ -266,7 +296,14 @@ namespace platf {
   }
 
   void streaming_will_stop() {
-    // Nothing to do
+    // A client that disconnects mid-keypress never sends the release, which would
+    // otherwise leave a modifier asserted against the local user's desktop.
+    macos_input_reset_modifiers();
+
+    // The virtual display exists for the session that asked for it, so it goes
+    // away with the session rather than lingering on the desktop.
+    solari_virtual_display_release();
+    macos_input_set_display(CGMainDisplayID());
   }
 
   static pid_t g_restart_child_pid = 0;  ///< PID of the restarted child process for signal forwarding.
@@ -299,6 +336,14 @@ namespace platf {
    * preserving Ctrl+C and terminal log output.
    */
   void restart_on_exit() {
+    // Before the fork, not after. This process is about to park itself in
+    // waitpid for the whole lifetime of its successor, so it never really dies,
+    // and a virtual display is owned by the task rather than by any file
+    // descriptor: closing fds below does nothing for it. Left alone it becomes
+    // an ownerless display on the user's desktop that blocks new ones, which is
+    // exactly the leak seen in testing.
+    solari_virtual_display_release();
+
     char executable[2048];
     uint32_t size = sizeof(executable);
     if (_NSGetExecutablePath(executable, &size) < 0) {

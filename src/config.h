@@ -51,6 +51,24 @@ namespace config {
      */
     int qp;  // higher == more compression and less quality
 
+    /**
+     * @brief Create an on-demand virtual display matching the client's resolution.
+     *
+     * macOS only. Streaming a display whose resolution differs from the client's
+     * means scaling somewhere, which is what makes a stream look soft.
+     */
+    std::string virtual_display;
+
+    /**
+     * @brief Logical size of the virtual display, as "WxH" in points.
+     *
+     * Only meaningful with virtual_display = hidpi. Empty means half the client's
+     * stream resolution. Setting it decouples how large the UI appears from how
+     * many pixels are streamed: the desktop renders at twice this size in pixels
+     * and capture scales that into the negotiated stream resolution.
+     */
+    std::string virtual_display_size;
+
     int hevc_mode;  ///< HEVC support mode advertised to clients.
     int av1_mode;  ///< AV1 support mode advertised to clients.
 

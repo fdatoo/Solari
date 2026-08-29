@@ -959,6 +959,9 @@ namespace platf {
   }
 #endif
 
+// Solari implements these natively on macOS in src/platform/macos/input.cpp, so
+// held modifiers and relative motion behave correctly during gameplay.
+#ifndef __APPLE__
   void move_mouse(input_t &input, int deltaX, int deltaY) {
     virtualhid::move_mouse(virtualhid::get_input_context(input), deltaX, deltaY);
   }
@@ -986,6 +989,7 @@ namespace platf {
   void unicode(input_t &input, const char *utf8, int size) {
     virtualhid::unicode(virtualhid::get_input_context(input), utf8, size);
   }
+#endif  // __APPLE__
 
   void touch_update(client_input_t *input, const touch_port_t &touch_port, const touch_input_t &touch) {
     virtualhid::touch_update(virtualhid::get_client_context(input), touch_port, touch);

@@ -35,6 +35,10 @@ extern "C" {
 #include "thread_pool.h"
 #include "utility.h"
 
+#ifdef __APPLE__
+  #include "platform/macos/misc.h"
+#endif
+
 // Win32 WHEEL_DELTA constant
 #ifndef WHEEL_DELTA
 constexpr int WHEEL_DELTA = 120;  ///< Standard Windows wheel delta used to normalize scroll events.
@@ -1966,7 +1970,10 @@ namespace input {
   void reset_keyboard_keys() {
     for (auto &[key, pressed] : key_press) {
       if (pressed) {
-        platf::keyboard_update(platf_input, vk_from_kpid(key) & 0x00FF, true, flags_from_kpid(key));
+        // The press was applied through map_keycode, so the release must be too.
+        // Releasing the raw code targets a different key whenever a binding remaps
+        // it, which leaves the mapped key held down after the session ends.
+        platf::keyboard_update(platf_input, map_keycode(vk_from_kpid(key) & 0x00FF), true, flags_from_kpid(key));
         pressed = false;
       }
     }
@@ -2005,6 +2012,13 @@ namespace input {
     reset_mouse_buttons();
     reset_keyboard_keys();
     reset_gamepads(input);
+
+#ifdef __APPLE__
+    // Runs here rather than from streaming_will_stop so it lands behind any client
+    // packets still queued on this pool. Clearing modifier state before that queue
+    // drains lets a straggling press re-assert a modifier for the next session.
+    platf::macos_input_reset_modifiers();
+#endif
   }
 
   /**

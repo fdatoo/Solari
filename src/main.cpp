@@ -30,6 +30,12 @@
 #include "upnp.h"
 #include "video.h"
 
+#ifdef __APPLE__
+extern "C" int solari_vd_select_hidpi_main(uint32_t display_id);
+extern "C" int solari_vd_make_primary_main(uint32_t display_id);
+extern "C" int solari_vd_restore_arrangement_main(const char *arrangement);
+#endif
+
 using namespace std::literals;
 
 std::map<int, std::function<void()>> signal_handlers;  ///< Signal handlers.
@@ -164,6 +170,19 @@ void mainThreadLoop(const std::shared_ptr<safe::event_t<bool>> &shutdown_event) 
  */
 int main(int argc, char *argv[]) {
 #ifdef __APPLE__
+  // Helper mode: re-executed by the running server to switch a virtual display
+  // to its HiDPI mode, because those mode queries fail inside the server process
+  // itself. Handled before any other initialisation so the child stays cheap.
+  if (argc == 3 && std::strcmp(argv[1], "--vd-select-hidpi") == 0) {
+    return solari_vd_select_hidpi_main(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)));
+  }
+  if (argc == 3 && std::strcmp(argv[1], "--vd-make-primary") == 0) {
+    return solari_vd_make_primary_main(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)));
+  }
+  if (argc == 3 && std::strcmp(argv[1], "--vd-restore-arrangement") == 0) {
+    return solari_vd_restore_arrangement_main(argv[2]);
+  }
+
   // Bundle assets are referenced relative to the executable
   // (e.g. ../Resources/assets), so anchor cwd to Contents/MacOS.
   {

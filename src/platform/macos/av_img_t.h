@@ -54,6 +54,22 @@ namespace platf {
     }
 
     /**
+     * @brief Take ownership of a pixel buffer that has no sample buffer behind it.
+     *
+     * The sample buffer constructor borrows its pixel buffer, whose lifetime the
+     * sample buffer owns. A synthesised frame has no such owner, so this retains
+     * the buffer for as long as the wrapper lives.
+     *
+     * @param pb Pixel buffer to retain and lock.
+     */
+    explicit av_pixel_buf_t(CVPixelBufferRef pb):
+        buf(pb),
+        owned(true) {
+      CVPixelBufferRetain(buf);
+      CVPixelBufferLockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
+    }
+
+    /**
      * @brief Return the base address of the locked Core Video pixel buffer.
      *
      * @return Pointer to the first byte of image data in the pixel buffer.
@@ -66,8 +82,14 @@ namespace platf {
     ~av_pixel_buf_t() {
       if (buf != nullptr) {
         CVPixelBufferUnlockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
+        if (owned) {
+          CVPixelBufferRelease(buf);
+        }
       }
     }
+
+  private:
+    bool owned {false};  ///< Whether this wrapper holds a reference of its own.
   };
 
   /**
