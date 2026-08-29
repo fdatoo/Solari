@@ -14,7 +14,10 @@
 #import <AppKit/AppKit.h>
 #import <signal.h>
 #import <spawn.h>
+#import <errno.h>
+#import <poll.h>
 #import <sys/wait.h>
+#import <unistd.h>
 
 // local includes
 #import "virtual_display.h"
@@ -24,6 +27,21 @@ static const NSTimeInterval kAdoptionTimeout = 3.0;
 
 /// Interval between checks while waiting for adoption.
 static const useconds_t kAdoptionPollInterval = 50000;
+
+/**
+ * Descriptor the helper writes its verdict to.
+ *
+ * The exit status cannot be used. proc_t::running() installs a process wide
+ * `waitpid(-1, ..., WNOHANG)` reaper that runs on every call, including from the
+ * control loop every 150 ms for the whole stream, so it routinely reaps these
+ * children first and leaves waitpid here returning ECHILD. That reads as failure
+ * for a helper that actually succeeded, which then re-spawns on every acquire
+ * and rearranges the desktop each time. A pipe cannot be stolen.
+ */
+static const int kHelperVerdictFD = 3;
+
+/// Byte the helper writes to report verified success.
+static const char kHelperSuccessByte = 'K';
 
 #pragma mark - Private CoreGraphics interfaces
 
@@ -61,6 +79,9 @@ static const useconds_t kAdoptionPollInterval = 50000;
 
 /// Display origins as they were before the virtual display took the origin.
 static NSString *g_saved_arrangement = nil;
+
+/// Forward declaration: the reconfiguration callback needs the shared instance.
+static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *context);
 
 #pragma mark - Implementation
 
@@ -261,12 +282,18 @@ static NSString *g_saved_arrangement = nil;
     return NO;
   }
 
+  int verdict[2] = {-1, -1};
+  if (pipe(verdict) != 0) {
+    return NO;
+  }
+
   NSString *displayArgument = [NSString stringWithFormat:@"%u", self.displayID];
   const char *argv[] = {executable.fileSystemRepresentation, flag, displayArgument.UTF8String, NULL};
 
   // The server's sockets are not O_CLOEXEC, so without this the helper inherits
   // every listening port and keeps them bound if the server dies while it runs,
-  // which stops the next instance binding them. stderr is kept for diagnostics.
+  // which stops the next instance binding them. stderr is kept for diagnostics,
+  // and the verdict pipe is placed at a descriptor the helper knows about.
   posix_spawnattr_t attributes;
   posix_spawnattr_init(&attributes);
   posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
@@ -274,35 +301,60 @@ static NSString *g_saved_arrangement = nil;
   posix_spawn_file_actions_t actions;
   posix_spawn_file_actions_init(&actions);
   posix_spawn_file_actions_adddup2(&actions, STDERR_FILENO, STDERR_FILENO);
+  posix_spawn_file_actions_adddup2(&actions, verdict[1], kHelperVerdictFD);
 
   pid_t child = 0;
   const int spawned = posix_spawn(&child, argv[0], &actions, &attributes, (char *const *) argv, NULL);
 
   posix_spawn_file_actions_destroy(&actions);
   posix_spawnattr_destroy(&attributes);
+  close(verdict[1]);
 
   if (spawned != 0) {
+    close(verdict[0]);
     NSLog(@"[sunshine] could not spawn the display helper %s", flag);
     return NO;
   }
 
-  const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 5.0;
+  // Read the verdict rather than the exit status. The read ends when the helper
+  // writes, or at end of file when it exits without writing, so this needs no
+  // cooperation from waitpid at all.
+  BOOL succeeded = NO;
+  const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 8.0;
+
   while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
-    int status = 0;
-    const pid_t reaped = waitpid(child, &status, WNOHANG);
-    if (reaped == child) {
-      return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    struct pollfd waiter = {.fd = verdict[0], .events = POLLIN};
+    const int ready = poll(&waiter, 1, 200);
+    if (ready < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
     }
-    if (reaped < 0) {
-      return NO;
+    if (ready == 0) {
+      continue;
     }
-    usleep(kAdoptionPollInterval);
+
+    char byte = 0;
+    const ssize_t got = read(verdict[0], &byte, 1);
+    if (got <= 0) {
+      break;  // helper exited without reporting success
+    }
+
+    succeeded = byte == kHelperSuccessByte;
+    break;
   }
 
-  kill(child, SIGKILL);
-  waitpid(child, NULL, 0);
-  NSLog(@"[sunshine] display helper %s timed out", flag);
-  return NO;
+  close(verdict[0]);
+
+  if (!succeeded) {
+    // Only meaningful if the helper is still alive; if the reaper already took
+    // it this is a no-op, which is why the verdict does not depend on it.
+    kill(child, SIGKILL);
+  }
+  waitpid(child, NULL, WNOHANG);
+
+  return succeeded;
 }
 
 /**
@@ -466,6 +518,20 @@ static NSString *g_saved_arrangement = nil;
 
 @end
 
+/**
+ * @brief Report verified success to the parent.
+ *
+ * Written to a pipe rather than signalled by exit status, which a process wide
+ * child reaper in this codebase routinely consumes first.
+ */
+static void solari_vd_report_success(void) {
+  const char byte = kHelperSuccessByte;
+  ssize_t written = 0;
+  do {
+    written = write(kHelperVerdictFD, &byte, 1);
+  } while (written < 0 && errno == EINTR);
+}
+
 int solari_vd_select_hidpi_main(uint32_t display_id) {
   // Runs in a fresh process where the mode queries actually work.
   const NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + 4.0;
@@ -526,6 +592,7 @@ int solari_vd_select_hidpi_main(uint32_t display_id) {
               CGDisplayModeGetPixelWidth(current), CGDisplayModeGetPixelHeight(current));
       CGDisplayModeRelease(current);
       if (active) {
+        solari_vd_report_success();
         return 0;
       }
     }
@@ -544,6 +611,7 @@ int solari_vd_make_primary_main(uint32_t display_id) {
 
   while ([NSDate timeIntervalSinceReferenceDate] < deadline) {
     if (CGDisplayIsMain(display_id)) {
+      solari_vd_report_success();
       return 0;
     }
 
@@ -596,6 +664,7 @@ int solari_vd_make_primary_main(uint32_t display_id) {
 
     if (CGDisplayIsMain(display_id)) {
       fprintf(stderr, "[vd-helper] display %u is now main\n", display_id);
+      solari_vd_report_success();
       return 0;
     }
 
@@ -674,10 +743,50 @@ static NSLock *g_shared_lock = nil;
 __attribute__((constructor)) static void solari_virtual_display_init(void) {
   g_shared_lock = [[NSLock alloc] init];
 
+  // Someone at the Mac can drag the arrangement in System Settings, or plug in a
+  // monitor, and the window server will renormalise origins. That silently
+  // demotes the virtual display, and without this the cached verification would
+  // keep claiming it is still main for the rest of the session.
+  CGDisplayRegisterReconfigurationCallback(solari_display_reconfigured, NULL);
+
   // streaming_will_stop only fires once a session has ended, but the encoder
   // probe creates a display before any session exists, and that one has nothing
   // to balance it. Exit is the backstop for every path that does not stream.
   atexit(solari_virtual_display_release);
+}
+
+/**
+ * @brief Drop cached verification when the display set changes.
+ *
+ * Only reacts once the change has been applied, and only to changes that can
+ * actually move a display, so a mode set of our own does not invalidate itself.
+ */
+static void solari_display_reconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *context) {
+  (void) display;
+  (void) context;
+
+  if (flags & kCGDisplayBeginConfigurationFlag) {
+    return;
+  }
+
+  const CGDisplayChangeSummaryFlags interesting =
+    kCGDisplayMovedFlag | kCGDisplaySetMainFlag | kCGDisplayAddFlag | kCGDisplayRemoveFlag | kCGDisplayDesktopShapeChangedFlag;
+  if (!(flags & interesting)) {
+    return;
+  }
+
+  [g_shared_lock lock];
+  SolariVirtualDisplay *shared = g_shared_display;
+  [g_shared_lock unlock];
+
+  if (!shared) {
+    return;
+  }
+
+  // Re-verified on the next acquire, which the capture path reaches on reinit.
+  if (!CGDisplayIsMain(shared.displayID)) {
+    shared.primaryVerified = NO;
+  }
 }
 
 CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double refreshRate, BOOL hiDPI) {
