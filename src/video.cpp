@@ -72,8 +72,20 @@ namespace video {
         return true;
       }
 
+#ifdef __APPLE__
+      // The check above exists for a Windows DXGI issue and is wrong here. On
+      // macOS a display can be active while its mode is unreadable from this
+      // process: mode queries return null for virtual displays this process
+      // created (see platform/macos/virtual_display.m), so a machine whose
+      // physical displays are asleep, streaming to its own virtual display,
+      // enumerates as having no active devices at all. Probing works fine in
+      // that state; refusing here is what turned a locked screen into a 503.
+      BOOST_LOG(warning) << "Display enumeration reports no active devices; probing anyway on macOS."sv;
+      return true;
+#else
       BOOST_LOG(error) << "No display devices are active at the moment! Cannot probe the encoders.";
       return false;
+#endif
     }
   }  // namespace
 
