@@ -217,9 +217,11 @@ static const double kReferenceWhiteNits = 100.0;
   configuration.pixelFormat = self.pixelFormat;
   configuration.showsCursor = self.showsCursor;
 
-  // Deeper than the default so a brief stall in the encoder drops frames inside
-  // ScreenCaptureKit rather than backing up into the window server.
-  configuration.queueDepth = 8;
+  // Small on purpose. The queue depth bounds how many frames can sit between
+  // the window server and the encoder, and every buffered frame is added
+  // latency between what the user does and what they see. Three is enough to
+  // ride out a scheduling hiccup without turning the queue into a delay line.
+  configuration.queueDepth = 3;
 
   // Scale rather than crop when the requested aspect ratio differs from the
   // display's, which it does whenever a client asks for a shape the panel is not.

@@ -809,6 +809,19 @@ CGDirectDisplayID solari_virtual_display_acquire(int width, int height, double r
 
   // Reuse whatever is already there when the geometry matches, so a probe run
   // does not tear the desktop apart once per encoder.
+  // A display can go away without this process asking: the window server
+  // terminates one when the desktop it belonged to is reconfigured, which
+  // happens when the physical displays sleep or are disconnected. Matching
+  // geometry is not enough, because the object outlives the display it names,
+  // and handing back a dead identifier means capturing a display that no longer
+  // exists while the log cheerfully reports success.
+  if (g_shared_display && ![SolariVirtualDisplay isDisplayActive:g_shared_display.displayID]) {
+    NSLog(@"[solari] virtual display %u went away; creating a new one", g_shared_display.displayID);
+    g_shared_display = nil;
+    g_shared_width = g_shared_height = 0;
+    g_shared_refresh = 0;
+  }
+
   if (g_shared_display && g_shared_width == width && g_shared_height == height &&
       g_shared_refresh == refreshRate && g_shared_hidpi == hiDPI) {
     SolariVirtualDisplay *existing = g_shared_display;

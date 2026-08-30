@@ -685,10 +685,40 @@ namespace input {
    * @param input Platform input backend that receives the event.
    * @param packet Protocol packet being processed.
    */
+#ifdef __APPLE__
+  /**
+   * @brief Match cursor compositing to the client's mouse mode.
+   *
+   * A client in absolute mode draws its own local cursor, which responds with
+   * zero latency; compositing the host cursor as well paints a second pointer
+   * that trails it by the full video round trip. A client in relative mode has
+   * no local cursor, so the composited one is the only pointer there is.
+   *
+   * Only acts when the mode changes, so the manual toggle keeps working within
+   * a mode.
+   */
+  void sync_cursor_composition(bool relative_mode) {
+    static int last_mode = -1;
+    const int mode = relative_mode ? 1 : 0;
+    if (mode == last_mode) {
+      return;
+    }
+
+    last_mode = mode;
+    display_cursor = relative_mode;
+    BOOST_LOG(info) << "Client mouse mode is "sv << (relative_mode ? "relative"sv : "absolute"sv)
+                    << ", host cursor compositing "sv << (relative_mode ? "on"sv : "off"sv);
+  }
+#endif
+
   void passthrough(std::shared_ptr<input_t> &input, PNV_REL_MOUSE_MOVE_PACKET packet) {
     if (!config::input.mouse) {
       return;
     }
+
+#ifdef __APPLE__
+    sync_cursor_composition(true);
+#endif
 
     input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
     platf::move_mouse(platf_input, util::endian::big(packet->deltaX), util::endian::big(packet->deltaY));
@@ -792,6 +822,10 @@ namespace input {
     if (!config::input.mouse) {
       return;
     }
+
+#ifdef __APPLE__
+    sync_cursor_composition(false);
+#endif
 
     if (input->mouse_left_button_timeout == DISABLE_LEFT_BUTTON_DELAY) {
       input->mouse_left_button_timeout = ENABLE_LEFT_BUTTON_DELAY;
